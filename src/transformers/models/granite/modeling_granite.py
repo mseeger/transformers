@@ -89,6 +89,7 @@ class GraniteRotaryEmbedding(nn.Module):
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device=None, **self.rope_kwargs)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
+        self.rotary_ndims = config.hidden_size // config.num_attention_heads
 
     def _dynamic_frequency_update(self, position_ids, device):
         """
@@ -124,6 +125,10 @@ class GraniteRotaryEmbedding(nn.Module):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
+            # Happens if self.rotary_ndims is odd
+            if self.config is not None and cos.shape[-1] > self.rotary_ndims:
+                cos = cos[..., :self.rotary_ndims]
+                sin = sin[..., :self.rotary_ndims]
 
         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
         cos = cos * self.attention_scaling

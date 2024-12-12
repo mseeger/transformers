@@ -83,7 +83,7 @@ class GPTNeoXJapaneseAttention(nn.Module):
             )
 
         self.layer_idx = layer_idx
-        self.rotary_ndims = int(self.head_size * config.rotary_pct)
+        self.rotary_ndims = int(self.head_size * config.partial_rotary_factor)
         self.rope_theta = config.rotary_emb_base
         self.rotary_emb = GPTNeoXJapaneseRotaryEmbedding(config=config)
         self.attention_dropout = nn.Dropout(config.attention_dropout)
@@ -253,6 +253,7 @@ class GPTNeoXJapaneseRotaryEmbedding(nn.Module):
             self.rope_type = rope_type
             self.max_seq_len_cached = max_position_embeddings
             self.original_max_seq_len = max_position_embeddings
+            self.rotary_ndims = None
         else:
             # BC: "rope_type" was originally "type"
             if config.rope_scaling is not None:
@@ -261,6 +262,8 @@ class GPTNeoXJapaneseRotaryEmbedding(nn.Module):
                 self.rope_type = "default"
             self.max_seq_len_cached = config.max_position_embeddings
             self.original_max_seq_len = config.max_position_embeddings
+            head_size = config.hidden_size // config.num_attention_heads
+            self.rotary_ndims = int(head_size * config.partial_rotary_factor)
 
         self.config = config
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
@@ -303,6 +306,10 @@ class GPTNeoXJapaneseRotaryEmbedding(nn.Module):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
+            # Happens if self.rotary_ndims is odd
+            if self.config is not None and cos.shape[-1] > self.rotary_ndims:
+                cos = cos[..., :self.rotary_ndims]
+                sin = sin[..., :self.rotary_ndims]
 
         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
         cos = cos * self.attention_scaling
