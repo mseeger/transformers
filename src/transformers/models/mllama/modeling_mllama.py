@@ -989,6 +989,7 @@ class MllamaRotaryEmbedding(nn.Module):
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
+        self.rotary_ndims = config.hidden_size // config.num_attention_heads
 
     def _dynamic_frequency_update(self, position_ids, device):
         """
@@ -1022,6 +1023,9 @@ class MllamaRotaryEmbedding(nn.Module):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if self.rotary_ndims is odd
+            if emb.shape[-1] > self.rotary_ndims:
+                emb = emb[..., :self.rotary_ndims]
             cos = emb.cos()
             sin = emb.sin()
 

@@ -31,8 +31,7 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor
-
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, RoPETesterMixin
 
 if is_torch_available():
     import torch
@@ -273,7 +272,7 @@ class GraniteMoeModelTester:
 
 
 @require_torch
-class GraniteMoeModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
+class GraniteMoeModelTest(ModelTesterMixin, GenerationTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (
         (
             GraniteMoeModel,
@@ -294,6 +293,9 @@ class GraniteMoeModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.Test
     test_headmasking = False
     test_pruning = False
     fx_compatible = False
+    # RoPETesterMixin
+    config_type = GraniteMoeConfig
+    model_type = GraniteMoeModel
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer

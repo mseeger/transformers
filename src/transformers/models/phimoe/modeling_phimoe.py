@@ -160,8 +160,11 @@ class PhimoeRotaryEmbedding(nn.Module):
         else:
             self.rope_type = "default"
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        self.rotary_ndims = config.hidden_size // config.num_attention_heads
 
-    def forward(self, x, seq_len=None):
+    def forward(self, x, seq_len: int):
+        if seq_len is None:
+            raise ValueError("seq_len must be given")
         mscale = None
         if self.config.rope_scaling and seq_len:
             mscale = (
@@ -175,7 +178,12 @@ class PhimoeRotaryEmbedding(nn.Module):
         freqs = torch.outer(t, inv_freq)
 
         emb = torch.cat((freqs, freqs), dim=-1)
-        return (emb.cos() * mscale).to(x.dtype), (emb.sin() * mscale).to(x.dtype)
+        # Happens if self.rotary_ndims is odd
+        if emb.shape[-1] > self.rotary_ndims:
+            emb = emb[..., :self.rotary_ndims]
+        cos = emb.cos()
+        sin = emb.sin()
+        return (cos * mscale).to(x.dtype), (sin * mscale).to(x.dtype)
 
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
@@ -274,14 +282,16 @@ class PhimoeAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if position_embeddings is None:
+            raise ValueError("position_embeddings = (cos, sin) must be given")
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -342,14 +352,16 @@ class PhimoeFlashAttention2(PhimoeAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
+        if position_embeddings is None:
+            raise ValueError("position_embeddings = (cos, sin) must be given")
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -436,14 +448,16 @@ class PhimoeSdpaAttention(PhimoeAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if position_embeddings is None:
+            raise ValueError("position_embeddings = (cos, sin) must be given")
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
             logger.warning_once(
@@ -452,12 +466,12 @@ class PhimoeSdpaAttention(PhimoeAttention):
             )
             return super().forward(
                 hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
-                position_embeddings=position_embeddings,
             )
 
         bsz, q_len, _ = hidden_states.size()
@@ -817,6 +831,7 @@ class PhimoeDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
@@ -824,7 +839,6 @@ class PhimoeDecoderLayer(nn.Module):
         output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -856,13 +870,13 @@ class PhimoeDecoderLayer(nn.Module):
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
-            position_embeddings=position_embeddings,
         )
         hidden_states = residual + hidden_states
 
@@ -1120,6 +1134,7 @@ class PhimoeModel(PhimoePreTrainedModel):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
+                    position_embeddings,
                     causal_mask,
                     position_ids,
                     past_key_values,
@@ -1127,11 +1142,11 @@ class PhimoeModel(PhimoePreTrainedModel):
                     output_router_logits,
                     use_cache,
                     cache_position,
-                    position_embeddings,
                 )
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
+                    position_embeddings=position_embeddings,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
@@ -1139,7 +1154,6 @@ class PhimoeModel(PhimoePreTrainedModel):
                     output_router_logits=output_router_logits,
                     use_cache=use_cache,
                     cache_position=cache_position,
-                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
