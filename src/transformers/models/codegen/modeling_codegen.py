@@ -56,6 +56,11 @@ def rotate_every_two(x: torch.Tensor) -> torch.Tensor:
 def apply_rotary_pos_emb(tensor: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor) -> torch.Tensor:
     sin = torch.repeat_interleave(sin[:, :, None, :], 2, 3)
     cos = torch.repeat_interleave(cos[:, :, None, :], 2, 3)
+    emb_size = tensor.shape[-1]
+    # Happens if emb_size is odd
+    if cos.shape[-1] > emb_size:
+        cos = cos[..., :emb_size]
+        sin = sin[..., :emb_size]
     return (tensor * cos) + (rotate_every_two(tensor) * sin)
 
 

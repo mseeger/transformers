@@ -160,6 +160,7 @@ class PhimoeRotaryEmbedding(nn.Module):
         else:
             self.rope_type = "default"
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        self.rotary_ndims = config.hidden_size // config.num_attention_heads
 
     def forward(self, x, seq_len=None):
         mscale = None
@@ -175,7 +176,12 @@ class PhimoeRotaryEmbedding(nn.Module):
         freqs = torch.outer(t, inv_freq)
 
         emb = torch.cat((freqs, freqs), dim=-1)
-        return (emb.cos() * mscale).to(x.dtype), (emb.sin() * mscale).to(x.dtype)
+        # Happens if self.rotary_ndims is odd
+        if emb.shape[-1] > self.rotary_ndims:
+            emb = emb[..., :self.rotary_ndims]
+        cos = emb.cos()
+        sin = emb.sin()
+        return (cos * mscale).to(x.dtype), (sin * mscale).to(x.dtype)
 
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half

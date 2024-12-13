@@ -99,6 +99,9 @@ class Phi3RotaryEmbedding(nn.Module):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if self.dim is odd
+            if emb.shape[-1] > self.dim:
+                emb = emb[..., :self.dim]
             cos = emb.cos()
             sin = emb.sin()
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
@@ -135,6 +138,9 @@ class Phi3SuScaledRotaryEmbedding(Phi3RotaryEmbedding):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if self.dim is odd
+            if emb.shape[-1] > self.dim:
+                emb = emb[..., :self.dim]
             scale = self.max_position_embeddings / self.original_max_position_embeddings
             if scale <= 1.0:
                 scaling_factor = 1.0
@@ -178,6 +184,9 @@ class Phi3YarnScaledRotaryEmbedding(Phi3RotaryEmbedding):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if self.dim is odd
+            if emb.shape[-1] > self.dim:
+                emb = emb[..., :self.dim]
 
             scale = self.max_position_embeddings / self.original_max_position_embeddings
             if scale <= 1.0:
@@ -219,6 +228,9 @@ class Phi3LongRoPEScaledRotaryEmbedding(Phi3RotaryEmbedding):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if self.dim is odd
+            if emb.shape[-1] > self.dim:
+                emb = emb[..., :self.dim]
 
             scale = self.max_position_embeddings / self.original_max_position_embeddings
             if scale <= 1.0:

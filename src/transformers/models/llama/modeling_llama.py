@@ -160,12 +160,11 @@ class LlamaRotaryEmbedding(nn.Module):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if self.rotary_ndims is odd
+            if self.config is not None and emb.shape[-1] > self.rotary_ndims:
+                emb = emb[..., :self.rotary_ndims]
             cos = emb.cos()
             sin = emb.sin()
-            # Happens if self.rotary_ndims is odd
-            if self.config is not None and cos.shape[-1] > self.rotary_ndims:
-                cos = cos[..., :self.rotary_ndims]
-                sin = sin[..., :self.rotary_ndims]
 
         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
         cos = cos * self.attention_scaling

@@ -104,6 +104,8 @@ class NemotronRotaryEmbedding(nn.Module):
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
+        head_size = config.hidden_size // config.num_attention_heads
+        self.rotary_ndims = int(head_size * config.partial_rotary_factor)
 
     def _dynamic_frequency_update(self, position_ids, device):
         """
@@ -137,6 +139,9 @@ class NemotronRotaryEmbedding(nn.Module):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if self.rotary_ndims is odd
+            if emb.shape[-1] > self.rotary_ndims:
+                emb = emb[..., :self.rotary_ndims]
             cos = emb.cos()
             sin = emb.sin()
 
@@ -237,13 +242,17 @@ class NemotronAttention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
-        self.partial_rotary_factor = config.partial_rotary_factor
+        head_size = config.hidden_size // config.num_attention_heads
+        self.rotary_ndims = int(head_size * config.partial_rotary_factor)
         self.is_causal = True
 
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(self.head_dim * self.num_heads, self.hidden_size, bias=config.attention_bias)
+
+    head_size = config.hidden_size // config.num_attention_heads
+    self.rotary_ndims = int(head_size * config.partial_rotary_factor)
 
     def forward(
         self,
@@ -256,6 +265,8 @@ class NemotronAttention(nn.Module):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if position_embeddings is None:
+            raise ValueError("position_embeddings = (cos, sin) is required")
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -266,9 +277,18 @@ class NemotronAttention(nn.Module):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        if position_embeddings is not None:
-            cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        # Compute rotary embeddings on rotary_ndims
+        query_rot = query_states[..., : self.rotary_ndims]
+        query_pass = query_states[..., self.rotary_ndims :]
+        key_rot = key_states[..., : self.rotary_ndims]
+        key_pass = key_states[..., self.rotary_ndims :]
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(
+            query_rot, key_rot, cos, sin
+        )
+        query_states = torch.cat((query_states, query_pass), dim=-1)
+        key_states = torch.cat((key_states, key_pass), dim=-1)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache

@@ -90,6 +90,9 @@ class RecurrentGemmaRotaryEmbedding(nn.Module):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if self.dim is odd
+            if emb.shape[-1] > self.dim:
+                emb = emb[..., :self.dim]
             cos = emb.cos()
             sin = emb.sin()
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
@@ -156,15 +159,14 @@ class RecurrentGemmaSdpaAttention(nn.Module):
         self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
-        self.partial_rotary_factor = config.partial_rotary_factor
+        self.rotary_ndims = int(self.head_dim * config.partial_rotary_factor)
 
         self.q_proj = nn.Linear(self.hidden_size, self.num_attention_heads * self.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(self.num_attention_heads * self.head_dim, self.hidden_size, bias=True)
         self.rotary_emb = RecurrentGemmaRotaryEmbedding(
-            int(self.partial_rotary_factor * self.head_dim),
-            base=config.rope_theta,
+            self.rotary_ndims, base=config.rope_theta,
         )
 
     def forward(
@@ -188,8 +190,10 @@ class RecurrentGemmaSdpaAttention(nn.Module):
         cos, sin = self.rotary_emb(value_states, position_ids, seq_len=None)
 
         # Partial rotary embedding
-        query_rot, query_pass = torch.chunk(query_states, int(1 / self.partial_rotary_factor), dim=-1)
-        key_rot, key_pass = torch.chunk(key_states, int(1 / self.partial_rotary_factor), dim=-1)
+        query_rot = query_states[..., : self.rotary_ndims]
+        query_pass = query_states[..., self.rotary_ndims :]
+        key_rot = key_states[..., : self.rotary_ndims]
+        key_pass = key_states[..., self.rotary_ndims :]
         query_rot, key_rot = apply_rotary_pos_emb(query_rot, key_rot, cos, sin, position_ids)
         query_states = torch.cat((query_rot, query_pass), dim=-1)
         key_states = torch.cat((key_rot, key_pass), dim=-1)

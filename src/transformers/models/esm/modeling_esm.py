@@ -87,8 +87,8 @@ class RotaryEmbedding(torch.nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         # Generate and save the inverse frequency buffer (non trainable)
+        self.dim = dim
         inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
-        inv_freq = inv_freq
         self.register_buffer("inv_freq", inv_freq)
 
         self._seq_len_cached = None
@@ -105,7 +105,9 @@ class RotaryEmbedding(torch.nn.Module):
             t = torch.arange(x.shape[seq_dimension], device=x.device).type_as(self.inv_freq)
             freqs = torch.outer(t, self.inv_freq)
             emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-
+            # Happens if self.dim is odd
+            if emb.shape[-1] > self.dim:
+                emb = emb[..., :self.dim]
             self._cos_cached = emb.cos()[None, None, :, :]
             self._sin_cached = emb.sin()[None, None, :, :]
 
