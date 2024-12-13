@@ -15,11 +15,13 @@
 """Testing suite for the PyTorch GPTNeoX model."""
 
 import unittest
+from typing import Dict, Any
 
 from parameterized import parameterized
 
 from transformers import AutoTokenizer, GPTNeoXConfig, is_torch_available, set_seed
 from transformers.testing_utils import require_torch, slow, torch_device
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
@@ -491,3 +493,90 @@ class GPTNeoXLanguageGenerationTest(unittest.TestCase):
         input_ids = torch.as_tensor(input_ids)[None].to(torch_device)
         outputs = model(input_ids)["logits"][:, -1][0, :30]
         self.assertTrue(torch.allclose(EXPECTED_LOGITS, outputs, atol=1e-5))
+
+    @staticmethod
+    def _get_rope_scaling(
+        rope_type: str, config: GPTNeoXConfig
+    ) -> Dict[str, Any]:
+        result = {
+            "rope_type": rope_type,
+            "factor": 1.0,
+            "original_max_position_embeddings": config.max_position_embeddings // 2,
+        }
+        if rope_type == "llama3":
+            result["low_freq_factor"] = 0.5
+            result["high_freq_factor"] = 1.0
+        elif rope_type == "longrope":
+            factors = [1.0] * (config.hidden_size // config.num_attention_heads // 2)
+            result["short_factor"] = factors
+            result["long_factor"] = factors
+        return result
+
+    @require_torch
+    def test_rope_forward_if_rotary_ndims_odd(self):
+        # rotary_ndims = int(head_size * rotary_pct) is the slice of the Q, K
+        # tensors on which RoPE embeddings are applied to. This can be odd,
+        # and forward should work then.
+        kwargs = dict(
+            vocab_size=16,
+            max_position_embeddings=16,
+            hidden_size=16,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            intermediate_size=3 * 16,
+            rotary_pct=0.75,  # Called partial_rotary_factor in most other models
+            use_parallel_residual=False,
+        )
+        _config = GPTNeoXConfig(**kwargs)
+        for rope_type in ROPE_INIT_FUNCTIONS.keys():
+            config = GPTNeoXConfig(
+                rope_scaling=self._get_rope_scaling(rope_type, _config),
+                **kwargs
+            )
+            # head_size = hidden_size
+            # rotary_ndims = int(head_size * rotary_pct) = 3
+            model = GPTNeoXModel(config)
+            input_ids = torch.randint(
+                0, config.vocab_size, (1, config.max_position_embeddings)
+            )
+            logits = model(input_ids).last_hidden_state
+            print(f"logits.shape = {logits.shape}")
+
+    @require_torch
+    def test_rope_params_shape_if_rotary_ndims_odd(self):
+        # rotary_ndims = int(head_size * rotary_pct) is the slice of the Q, K
+        # tensors on which RoPE embeddings are applied to. This can be odd,
+        # in which case the shape of RoPE `cos`, `sin` parameters must match
+        # the Q, K shapes.
+        max_position_embeddings = 16
+        seq_len = 12
+        batch_size = 3
+        x = torch.randn((1,))
+        position_ids = torch.randint(
+            0, max_position_embeddings, (batch_size, seq_len)
+        )
+        for rotary_pct in (0.25, 0.5, 0.75, 1.0):
+            kwargs = dict(
+                vocab_size=16,
+                max_position_embeddings=max_position_embeddings,
+                hidden_size=16,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                intermediate_size=3 * 16,
+                rotary_pct=rotary_pct,  # Called partial_rotary_factor in most other models
+                use_parallel_residual=False,
+            )
+            _config = GPTNeoXConfig(**kwargs)
+            for rope_type in ROPE_INIT_FUNCTIONS.keys():
+                config = GPTNeoXConfig(
+                    rope_scaling=self._get_rope_scaling(rope_type, _config),
+                    **kwargs
+                )
+                head_size = config.hidden_size // config.num_attention_heads
+                rotary_ndims = int(head_size * rotary_pct)
+                model = GPTNeoXModel(config)
+                rotary_emb = model.rotary_emb
+                required_shape = (batch_size, seq_len, rotary_ndims)
+                cos, sin = rotary_emb(x, position_ids)
+                self.assertEqual(cos.shape, required_shape)
+                self.assertEqual(sin.shape, required_shape)
