@@ -89,7 +89,7 @@ class PhiRotaryEmbedding(nn.Module):
             self.rope_type = rope_type
             self.max_seq_len_cached = max_position_embeddings
             self.original_max_seq_len = max_position_embeddings
-            selfd.rotary_ndims = None
+            self.rotary_ndims = None
         else:
             # BC: "rope_type" was originally "type"
             if config.rope_scaling is not None:
@@ -380,8 +380,9 @@ class PhiFlashAttention2(PhiAttention):
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         # PhiFlashAttention2 attention does not support output_attentions
-
-        output_attentions = False
+        if output_attentions:
+            print("WARNING: PhiFlashAttention2 does not support output_attentions=True. Switching to False.")
+            output_attentions = False
 
         bsz, q_len, _ = hidden_states.size()
 

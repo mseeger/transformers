@@ -251,9 +251,6 @@ class NemotronAttention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(self.head_dim * self.num_heads, self.hidden_size, bias=config.attention_bias)
 
-    head_size = config.hidden_size // config.num_attention_heads
-    self.rotary_ndims = int(head_size * config.partial_rotary_factor)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
