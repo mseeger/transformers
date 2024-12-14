@@ -22,7 +22,12 @@ from transformers.testing_utils import require_torch, slow, torch_device
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask
+from ...test_modeling_common import (
+    ModelTesterMixin,
+    ids_tensor,
+    random_attention_mask,
+    RoPETesterMixin,
+)
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -196,7 +201,13 @@ class GPTNeoXJapaneseModelTester:
 
 
 @require_torch
-class GPTNeoXModelJapaneseTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class GPTNeoXModelJapaneseTest(
+    ModelTesterMixin,
+    GenerationTesterMixin,
+    PipelineTesterMixin,
+    RoPETesterMixin,
+    unittest.TestCase,
+):
     all_model_classes = (GPTNeoXJapaneseModel, GPTNeoXJapaneseForCausalLM) if is_torch_available() else ()
     all_generative_model_classes = (GPTNeoXJapaneseForCausalLM,) if is_torch_available() else ()
     pipeline_model_mapping = (
@@ -208,6 +219,10 @@ class GPTNeoXModelJapaneseTest(ModelTesterMixin, GenerationTesterMixin, Pipeline
     test_missing_keys = False
     test_model_parallel = False
     test_head_masking = False
+    # RoPETesterMixin:
+    config_type = GPTNeoXJapaneseConfig
+    model_type = GPTNeoXJapaneseModel
+    partial_rotary_factor_key = "rotary_pct"
 
     def setUp(self):
         self.model_tester = GPTNeoXJapaneseModelTester(self)

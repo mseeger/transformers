@@ -25,7 +25,7 @@ import tempfile
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Any
 
 import numpy as np
 from packaging import version
@@ -49,6 +49,7 @@ from transformers.integrations.deepspeed import (
     is_deepspeed_zero3_enabled,
     unset_hf_deepspeed_config,
 )
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.models.auto import get_values
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING_NAMES,
@@ -4873,3 +4874,110 @@ def floats_tensor(shape, scale=1.0, rng=None, name=None):
         values.append(rng.random() * scale)
 
     return torch.tensor(data=values, dtype=torch.float, device=torch_device).view(shape).contiguous()
+
+
+@require_torch
+class RoPETesterMixin:
+    config_type: type[PretrainedConfig] = None
+    model_type: type[nn.Module] = None
+    config_kwargs: Dict[str, Any] = None
+    partial_rotary_factor_key: str = "partial_rotary_factor"
+    supported_rope_types: Tuple[str] = None
+
+    def _check_parameters(self):
+        if self.config_type is None:
+            raise ValueError("config_type must be set for RoPETesterMixin")
+        if self.model_type is None:
+            raise ValueError("model_type must be set for RoPETesterMixin")
+        if self.config_kwargs is None:
+            self.config_kwargs = dict()
+        if self.supported_rope_types is None:
+            self.supported_rope_types = tuple(ROPE_INIT_FUNCTIONS.keys())
+
+    @staticmethod
+    def _get_rope_scaling(
+        rope_type: str, config: PretrainedConfig
+    ) -> Dict[str, Any]:
+        result = {
+            "type": rope_type,
+            "factor": 1.5,
+        }
+        if rope_type in ("dynamic", "logrope", "llama3"):
+            result["original_max_position_embeddings"] = config.max_position_embeddings // 2
+        if rope_type == "llama3":
+            result["low_freq_factor"] = 0.5
+            result["high_freq_factor"] = 1.0
+        elif rope_type == "longrope":
+            factors = [1.0] * (config.hidden_size // config.num_attention_heads // 2)
+            result["short_factor"] = factors
+            result["long_factor"] = factors
+        return result
+
+    def test_rope_forward_if_rotary_ndims_odd(self):
+        # rotary_ndims = int(head_size * rotary_pct) is the slice of the Q, K
+        # tensors on which RoPE embeddings are applied to. This can be odd,
+        # and forward should work then.
+        self._check_parameters()
+        kwargs = {
+            "vocab_size": 16,
+            "max_position_embeddings": 16,
+            "hidden_size": 16,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "intermediate_size": 3 * 16,
+            self.partial_rotary_factor_key: 0.75,
+            **self.config_kwargs,
+        }
+        _config = self.config_type(**kwargs)
+        for rope_type in self.supported_rope_types:
+            config = self.config_type(
+                rope_scaling=self._get_rope_scaling(rope_type, _config),
+                **kwargs
+            )
+            # head_size = hidden_size
+            # rotary_ndims = int(head_size * rotary_pct) = 3
+            model = self.model_type(config)
+            input_ids = torch.randint(
+                0, config.vocab_size, (1, config.max_position_embeddings)
+            )
+            logits = model(input_ids).last_hidden_state
+            print(f"logits.shape = {logits.shape}")
+
+    def test_rope_params_shape_if_rotary_ndims_odd(self) -> Dict[str, Any]:
+        # rotary_ndims = int(head_size * rotary_pct) is the slice of the Q, K
+        # tensors on which RoPE embeddings are applied to. This can be odd,
+        # in which case the shape of RoPE `cos`, `sin` parameters must match
+        # the Q, K shapes.
+        self._check_parameters()
+        max_position_embeddings = 16
+        seq_len = 12
+        batch_size = 3
+        x = torch.randn((1,))
+        position_ids = torch.randint(
+            0, max_position_embeddings, (batch_size, seq_len)
+        )
+        for partial_rotary_factor in (0.25, 0.5, 0.75, 1.0):
+            kwargs = {
+                "vocab_size": 16,
+                "max_position_embeddings": max_position_embeddings,
+                "hidden_size": 16,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "intermediate_size": 3 * 16,
+                self.partial_rotary_factor_key: partial_rotary_factor,
+                **self.config_kwargs,
+            }
+            _config = self.config_type(**kwargs)
+            for rope_type in self.supported_rope_types:
+                config = self.config_type(
+                    rope_scaling=self._get_rope_scaling(rope_type, _config),
+                    **kwargs
+                )
+                head_size = config.hidden_size // config.num_attention_heads
+                rotary_ndims = int(head_size * partial_rotary_factor)
+                model = self.model_type(config)
+                rotary_emb = model.rotary_emb
+                required_shape = (batch_size, seq_len, rotary_ndims)
+                cos, sin = rotary_emb(x, position_ids)
+                self.assertEqual(cos.shape, required_shape)
+                self.assertEqual(sin.shape, required_shape)

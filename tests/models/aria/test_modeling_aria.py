@@ -40,8 +40,7 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
-
+from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor, RoPETesterMixin
 
 if is_torch_available():
     import torch
@@ -185,7 +184,7 @@ class AriaVisionText2TextModelTester:
 
 
 @require_torch
-class AriaForConditionalGenerationModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
+class AriaForConditionalGenerationModelTest(ModelTesterMixin, GenerationTesterMixin, RoPETesterMixin, unittest.TestCase):
     """
     Model tester for `AriaForConditionalGeneration`.
     """
@@ -194,6 +193,9 @@ class AriaForConditionalGenerationModelTest(ModelTesterMixin, GenerationTesterMi
     all_generative_model_classes = (AriaForConditionalGeneration,) if is_torch_available() else ()
     test_pruning = False
     test_head_masking = False
+    # RoPETesterMixin
+    config_type = AriaConfig
+    model_type = AriaForConditionalGeneration
     _is_composite = True
 
     def setUp(self):

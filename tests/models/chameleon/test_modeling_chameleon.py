@@ -30,7 +30,7 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -269,7 +269,7 @@ class ChameleonModelTester:
 
 
 @require_torch
-class ChameleonModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class ChameleonModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (ChameleonModel, ChameleonForConditionalGeneration) if is_torch_available() else ()
     all_generative_model_classes = (ChameleonForConditionalGeneration,) if is_torch_available() else ()
     pipeline_model_mapping = (
@@ -284,6 +284,10 @@ class ChameleonModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTester
     test_headmasking = False
     test_pruning = False
     fx_compatible = False
+    # RoPETesterMixin
+    config_type = ChameleonConfig
+    model_type = ChameleonModel
+    supported_rope_types = ("linear", "dynamic")
 
     def setUp(self):
         self.model_tester = ChameleonModelTester(self)
