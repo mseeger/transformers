@@ -23,7 +23,7 @@ from transformers.testing_utils import backend_manual_seed, is_flaky, require_to
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -321,7 +321,7 @@ class CodeGenModelTester:
 
 
 @require_torch
-class CodeGenModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class CodeGenModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (CodeGenModel, CodeGenForCausalLM) if is_torch_available() else ()
     all_generative_model_classes = (CodeGenForCausalLM,) if is_torch_available() else ()
     pipeline_model_mapping = (
@@ -332,6 +332,9 @@ class CodeGenModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi
     test_missing_keys = False
     test_model_parallel = False
     test_head_masking = False
+    # RoPETesterMixin
+    config_type = CodeGenConfig
+    model_type = CodeGenModel
 
     # special case for DoubleHeads model
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
