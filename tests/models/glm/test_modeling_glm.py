@@ -31,7 +31,7 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -280,7 +280,7 @@ class GlmModelTester:
 
 
 @require_torch
-class GlmModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class GlmModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (
         (GlmModel, GlmForCausalLM, GlmForSequenceClassification, GlmForTokenClassification)
         if is_torch_available()
@@ -299,6 +299,11 @@ class GlmModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin,
     )
     test_headmasking = False
     test_pruning = False
+    # RoPETesterMixin
+    config_type = GlmConfig
+    model_type = GlmModel
+    partial_rotary_factor_key = "partial_rotary_factor"
+    config_extra_kwargs = lambda self, config_kwargs: {"pad_token_id": 0}
 
     def setUp(self):
         self.model_tester = GlmModelTester(self)

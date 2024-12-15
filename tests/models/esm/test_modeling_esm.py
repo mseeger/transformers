@@ -220,7 +220,10 @@ class EsmModelTest(ModelTesterMixin, PipelineTesterMixin, RoPETesterMixin, unitt
     # RoPETesterMixin
     config_type = EsmConfig
     model_type = EsmModel
-    config_kwargs = {"position_embedding_type": "rotary"}
+    config_extra_kwargs = lambda self, config_kwargs: {
+        "position_embedding_type": "rotary",
+        "pad_token_id": 0,
+    }
     cos_sin_from_model = esm_cos_sin_from_model
 
     def setUp(self):
