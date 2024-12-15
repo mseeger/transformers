@@ -21,7 +21,7 @@ from transformers.testing_utils import require_torch, slow, torch_device
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -320,12 +320,16 @@ class DbrxModelTester:
 
 
 @require_torch
-class DbrxModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class DbrxModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (DbrxModel, DbrxForCausalLM) if is_torch_available() else ()
     all_generative_model_classes = (DbrxForCausalLM,) if is_torch_available() else ()
     pipeline_model_mapping = {"text-generation": DbrxForCausalLM} if is_torch_available() else {}
     test_headmasking = False
     test_pruning = False
+    # RoPETesterMixin
+    config_type = DbrxConfig
+    model_type = DbrxModel
+    embedding_from_model = lambda self, model: model.blocks[0].norm_attn_norm.attn
 
     def setUp(self):
         self.model_tester = DbrxModelTester(self)

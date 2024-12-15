@@ -4877,14 +4877,63 @@ def floats_tensor(shape, scale=1.0, rng=None, name=None):
     return torch.tensor(data=values, dtype=torch.float, device=torch_device).view(shape).contiguous()
 
 
+def _default_cos_sin_from_model(
+    model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    This default of `RoPETesterMixin.cos_sin_from_model` works for many models.
+    It assumes that the model class has a member `rotary_emb` for a rotary
+    embedding class, whose `forward` returns `cos`, `sin`, given `x` and
+    `position_ids`.
+
+    This works because rotary embeddings can in general be shared across all
+    self-attention blocks of all transformer layers, and `cos`, `sin` can
+    be precomputed. Unfortunately, a number of models don't do this.
+
+    Args:
+        model: Model object
+        x: Argument supplying `dtype`, `device`
+        position_ids: Supplies position indices
+
+    Returns:
+        cos, sin: Tensors used in RoPE
+    """
+    rotary_emb = model.rotary_emb
+    cos, sin = rotary_emb(x, position_ids)
+    return cos, sin
+
+
 @require_torch
 class RoPETesterMixin:
+    """
+    Provides tests for rotary positional embedding (RoPE), as supported in
+    some models.
+
+    - `model_type`: `PreTrainedModel` child class to be tested
+    - `config_type`: Configuration class for the model
+    - `config_kwargs`: Optional. Additional parameters to be set in the
+      `config` object
+    - `partial_rotary_factor_key`: Some models implement partial RoPE, where
+      embedding are applied to an initial fraction along the sequence dimension
+      only. If so, this must be the name of the fraction parameter in the
+      `config` object. If not given, RoPE is applied along the full length
+    - `supported_rope_types`: Some models do not support all RoPE embedding types
+      in :const:`ROPE_INIT_FUNCTIONS`. If so, list the supported ones here
+    - `cos_sin_from_model`: RoPE embeddings are defined by `cos`, `sin` tensors.
+      This argument is a function which returns these. Inputs are the model and
+      two tensors `x`, `position_ids`. The first is only used for `x.dtype`,
+      `x.device`, in that `cos`. The second provides position indices of the
+      input sequence(s), can be batched
+    """
     config_type: type[PretrainedConfig] = None
     model_type: type[PreTrainedModel] = None
-    embedding_from_model: Callable[[PreTrainedModel], nn.Module] = None
     config_kwargs: Dict[str, Any] = None
     partial_rotary_factor_key: Optional[str] = None
     supported_rope_types: Tuple[str] = None
+    cos_sin_from_model: Callable[
+        [PreTrainedModel, torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor]
+    ] = None
 
     def _check_parameters(self):
         if self.config_type is None:
@@ -4895,12 +4944,11 @@ class RoPETesterMixin:
             self.config_kwargs = dict()
         if self.supported_rope_types is None:
             self.supported_rope_types = tuple(ROPE_INIT_FUNCTIONS.keys())
-        if self.embedding_from_model is None:
-            self.embedding_from_model = lambda model: model.rotary_emb
+        if self.cos_sin_from_model is None:
+            self.cos_sin_from_model = _default_cos_sin_from_model
 
-    @staticmethod
     def _get_rope_scaling(
-        rope_type: str, config: PretrainedConfig
+        self, rope_type: str, config: PretrainedConfig
     ) -> Dict[str, Any]:
         result = {
             "type": rope_type,
@@ -4913,7 +4961,15 @@ class RoPETesterMixin:
             result["low_freq_factor"] = 0.5
             result["high_freq_factor"] = 1.0
         elif rope_type == "longrope":
-            factors = [1.0] * (config.hidden_size // config.num_attention_heads // 2)
+            prf_key = self.partial_rotary_factor_key
+            if prf_key is not None and hasattr(config, prf_key):
+                partial_rotary_factor = getattr(config, prf_key)
+            else:
+                partial_rotary_factor = 1.0
+            head_size = config.hidden_size // config.num_attention_heads
+            rotary_ndims = int(head_size * partial_rotary_factor)
+            factor_size = math.ceil(rotary_ndims / 2)
+            factors = [1.0] * factor_size
             result["short_factor"] = factors
             result["long_factor"] = factors
         return result
@@ -5035,9 +5091,7 @@ class RoPETesterMixin:
             )
             head_size = config.hidden_size // config.num_attention_heads
             model = self.model_type(config)
-            rotary_emb = self.embedding_from_model(model)
-            print(f"*** {type(rotary_emb)}")
+            cos, sin = self.cos_sin_from_model(model, x, position_ids)
             required_shape = (batch_size, seq_len, head_size)
-            cos, sin = rotary_emb(x, position_ids)
             self.assertEqual(cos.shape, required_shape)
             self.assertEqual(sin.shape, required_shape)

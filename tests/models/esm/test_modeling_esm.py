@@ -16,11 +16,12 @@
 
 import unittest
 
-from transformers import EsmConfig, is_torch_available
+from transformers import EsmConfig, is_torch_available, PreTrainedModel
 from transformers.testing_utils import TestCasePlus, require_bitsandbytes, require_torch, slow, torch_device
+from typing import Tuple
 
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -181,8 +182,15 @@ class EsmModelTester:
         return config, inputs_dict
 
 
+def esm_cos_sin_from_model(
+    self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    rotary_emb = model.encoder.layer[0].attention.self.rotary_embeddings
+    return rotary_emb._update_cos_sin_tables(position_ids, seq_dimension=-1)
+
+
 @require_torch
-class EsmModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class EsmModelTest(ModelTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     test_mismatched_shapes = False
 
     all_model_classes = (
@@ -209,6 +217,11 @@ class EsmModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     )
     test_sequence_classification_problem_types = True
     model_split_percents = [0.5, 0.8, 0.9]
+    # RoPETesterMixin
+    config_type = EsmConfig
+    model_type = EsmModel
+    config_kwargs = {"position_embedding_type": "rotary"}
+    cos_sin_from_model = esm_cos_sin_from_model
 
     def setUp(self):
         self.model_tester = EsmModelTester(self)
