@@ -16,7 +16,7 @@
 
 import unittest
 
-from transformers import GPTNeoXJapaneseConfig, is_torch_available
+from transformers import GPTNeoXJapaneseConfig, is_torch_available, PretrainedConfig
 from transformers.models.gpt_neox_japanese.tokenization_gpt_neox_japanese import GPTNeoXJapaneseTokenizer
 from transformers.testing_utils import require_torch, slow, torch_device
 
@@ -200,6 +200,15 @@ class GPTNeoXJapaneseModelTester:
         return config, inputs_dict
 
 
+def gptneox_set_partial_rotary_factor(self, kwargs, val):
+    kwargs["rotary_pct"] = val
+
+
+def gptneox_get_rotary_ndims(self, config: PretrainedConfig) -> int:
+    head_size = config.hidden_size // config.num_attention_heads
+    return int (head_size * config.rotary_pct)
+
+
 @require_torch
 class GPTNeoXModelJapaneseTest(
     ModelTesterMixin,
@@ -222,7 +231,8 @@ class GPTNeoXModelJapaneseTest(
     # RoPETesterMixin:
     config_type = GPTNeoXJapaneseConfig
     model_type = GPTNeoXJapaneseModel
-    partial_rotary_factor_key = "rotary_pct"
+    set_partial_rotary_factor = gptneox_set_partial_rotary_factor
+    get_rotary_ndims = gptneox_get_rotary_ndims
 
     def setUp(self):
         self.model_tester = GPTNeoXJapaneseModelTester(self)

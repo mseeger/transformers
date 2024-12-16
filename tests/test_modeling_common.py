@@ -4903,6 +4903,37 @@ def _default_cos_sin_from_model(
     return cos, sin
 
 
+def _default_initialize_config_kwargs(
+    vocab_size: int,
+    max_position_embeddings: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    intermediate_size: int,
+) -> Dict[str, Any]:
+    """
+    Default for `RoPETesterMixin.initialize_config_kwargs`.
+
+    Args:
+        vocab_size: Number of tokens in vocabulary
+        max_position_embeddings: Maximum sequence lenght supported
+        hidden_size: Size of embedding vectors per token
+        num_hidden_layers: Number of transformer layers
+        num_attention_heads: Number of attention heads. hidden_size must be
+            a multiple of this
+        intermediate_size: Hidden layer size of MLP block in transformer
+
+    Returns:
+        kwargs to create config object from
+    """
+    return {
+        "vocab_size": vocab_size,
+        "max_position_embeddings": max_position_embeddings,
+        "hidden_size": hidden_size,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
+        "intermediate_size": intermediate_size,
+    }
 
 
 @require_torch
@@ -4913,13 +4944,21 @@ class RoPETesterMixin:
 
     - `model_type`: `PreTrainedModel` child class to be tested
     - `config_type`: Configuration class for the model
+    - `initialize_config_kwargs`: Function
+       `initialize_config_kwargs(vocab_size, max_position_embeddings,
+       hidden_size, num_hidden_layers, num_attention_heads, intermediate_size)`
+       returns parameters with which `config` object is created. See
+       :func:`_default_initialize_config_kwargs` for the default.
     - `config_extra_kwargs`: Optional. Additional parameters to be set in the
       `config` object. This is a function `config_extra_kwargs(config_kwargs)`,
       where the argument `config_kwargs` are the parameters set by the test
-    - `partial_rotary_factor_key`: Some models implement partial RoPE, where
-      embedding are applied to an initial fraction along the sequence dimension
-      only. If so, this must be the name of the fraction parameter in the
-      `config` object. If not given, RoPE is applied along the full length
+    - `set_partial_rotary_factor`: Some models implement partial RoPE, where
+      embeddings are applied to an initial fraction along the sequence dimension
+      only. If so, this function `set_partial_rotary_factor(kwargs, val)` sets
+      parameters in `kwargs` (used to create `config`) so that this fraction
+      has value `val`. If not given, RoPE is applied along the full length
+    - `get_rotary_ndims`: Coupled with `set_partial_rotary_factor`. Returns the
+      size of the initial fraction RoPE embeddings are applied to.
     - `supported_rope_types`: Some models do not support all RoPE embedding types
       in :const:`ROPE_INIT_FUNCTIONS`. If so, list the supported ones here
     - `cos_sin_from_model`: RoPE embeddings are defined by `cos`, `sin` tensors.
@@ -4930,8 +4969,10 @@ class RoPETesterMixin:
     """
     config_type: type[PretrainedConfig] = None
     model_type: type[PreTrainedModel] = None
+    initialize_config_kwargs: Callable[[int, int, int, int, int, int], Dict[str, Any]] = None
     config_extra_kwargs: Callable[[Dict[str, Any]], Dict[str, Any]] = None
-    partial_rotary_factor_key: Optional[str] = None
+    set_partial_rotary_factor: Optional[Callable[[Dict[str, Any], float], None]] = None
+    get_rotary_ndims: Callable[[PretrainedConfig], int] = None
     supported_rope_types: Tuple[str] = None
     cos_sin_from_model: Callable[
         [PreTrainedModel, torch.Tensor, torch.Tensor],
@@ -4949,6 +4990,14 @@ class RoPETesterMixin:
             self.supported_rope_types = tuple(ROPE_INIT_FUNCTIONS.keys())
         if self.cos_sin_from_model is None:
             self.cos_sin_from_model = _default_cos_sin_from_model
+        if self.get_rotary_ndims is None:
+            if self.set_partial_rotary_factor is not None:
+                raise ValueError("get_rotary_ndims must be given if set_partial_rotary_factor is given")
+            self.get_rotary_ndims = lambda config: config.hidden_size // config.num_attention_heads
+        elif self.set_partial_rotary_factor is None:
+            raise ValueError("set_partial_rotary_factor must be given if get_rotary_ndims is given")
+        if self.initialize_config_kwargs is None:
+            self.initialize_config_kwargs = _default_initialize_config_kwargs
 
     def _get_rope_scaling(
         self, rope_type: str, config: PretrainedConfig
@@ -4964,13 +5013,7 @@ class RoPETesterMixin:
             result["low_freq_factor"] = 0.5
             result["high_freq_factor"] = 1.0
         elif rope_type == "longrope":
-            prf_key = self.partial_rotary_factor_key
-            if prf_key is not None and hasattr(config, prf_key):
-                partial_rotary_factor = getattr(config, prf_key)
-            else:
-                partial_rotary_factor = 1.0
-            head_size = config.hidden_size // config.num_attention_heads
-            rotary_ndims = int(head_size * partial_rotary_factor)
+            rotary_ndims = self.get_rotary_ndims(config)
             factor_size = math.ceil(rotary_ndims / 2)
             factors = [1.0] * factor_size
             result["short_factor"] = factors
@@ -4987,17 +5030,17 @@ class RoPETesterMixin:
         # tensors on which RoPE embeddings are applied to. This can be odd,
         # and forward should work then.
         self._check_parameters()
-        if self.partial_rotary_factor_key is not None:
+        if self.set_partial_rotary_factor is not None:
             # rotary_ndims odd due to partial_rotary_factor
-            kwargs = {
-                "vocab_size": 16,
-                "max_position_embeddings": 16,
-                "hidden_size": 16,
-                "num_hidden_layers": 2,
-                "num_attention_heads": 4,
-                "intermediate_size": 3 * 16,
-                self.partial_rotary_factor_key: 0.75,
-            }
+            kwargs = self.initialize_config_kwargs(
+                16,  # vocab_size
+                16,  # max_position_embeddings
+                16,  # hidden_size
+                2,   # num_hidden_layers
+                4,   # num_attention_heads
+                48,  # intermediate_size
+            )
+            self.set_partial_rotary_factor(kwargs, 0.75)
             kwargs.update(self.config_extra_kwargs(kwargs))
             # head_size = hidden_size // num_attention_heads = 4
             # rotary_ndims = int(head_size * rotary_pct) = 3
@@ -5015,16 +5058,16 @@ class RoPETesterMixin:
                 logits = model(input_ids).last_hidden_state
                 print(f"logits.shape = {logits.shape}")
         # rotary_ndims == head_size is odd
-        kwargs = {
-            "vocab_size": 16,
-            "max_position_embeddings": 16,
-            "hidden_size": 20,
-            "num_hidden_layers": 2,
-            "num_attention_heads": 4,
-            "intermediate_size": 3 * 16,
-        }
-        if self.partial_rotary_factor_key is not None:
-            kwargs[self.partial_rotary_factor_key] = 1.0
+        kwargs = self.initialize_config_kwargs(
+            16,  # vocab_size
+            16,  # max_position_embeddings
+            20,  # hidden_size
+            2,  # num_hidden_layers
+            4,  # num_attention_heads
+            48,  # intermediate_size
+        )
+        if self.set_partial_rotary_factor is not None:
+            self.set_partial_rotary_factor(kwargs, 1.0)
         kwargs.update(self.config_extra_kwargs(kwargs))
         # head_size = hidden_size // num_attention_heads = 5
         _config = self.config_type(**kwargs)
@@ -5054,18 +5097,18 @@ class RoPETesterMixin:
         position_ids = torch.randint(
             0, max_position_embeddings, (batch_size, seq_len)
         )
-        if self.partial_rotary_factor_key is not None:
+        if self.set_partial_rotary_factor is not None:
             # rotary_ndims odd due to partial_rotary_factor
             for partial_rotary_factor in (0.25, 0.5, 0.75, 1.0):
-                kwargs = {
-                    "vocab_size": 16,
-                    "max_position_embeddings": max_position_embeddings,
-                    "hidden_size": 16,
-                    "num_hidden_layers": 2,
-                    "num_attention_heads": 4,
-                    "intermediate_size": 3 * 16,
-                    self.partial_rotary_factor_key: partial_rotary_factor,
-                }
+                kwargs = self.initialize_config_kwargs(
+                    16,  # vocab_size
+                    max_position_embeddings,
+                    16,  # hidden_size
+                    2,  # num_hidden_layers
+                    4,  # num_attention_heads
+                    48,  # intermediate_size
+                )
+                self.set_partial_rotary_factor(kwargs, partial_rotary_factor)
                 kwargs.update(self.config_extra_kwargs(kwargs))
                 _config = self.config_type(**kwargs)
                 for rope_type in self.supported_rope_types:
@@ -5077,22 +5120,21 @@ class RoPETesterMixin:
                     head_size = config.hidden_size // config.num_attention_heads
                     rotary_ndims = int(head_size * partial_rotary_factor)
                     model = self.model_type(config)
-                    rotary_emb = model.rotary_emb
+                    cos, sin = self.cos_sin_from_model(model, x, position_ids)
                     required_shape = (batch_size, seq_len, rotary_ndims)
-                    cos, sin = rotary_emb(x, position_ids)
                     self.assertEqual(cos.shape, required_shape)
                     self.assertEqual(sin.shape, required_shape)
         # rotary_ndims == head_size is odd
-        kwargs = {
-            "vocab_size": 16,
-            "max_position_embeddings": max_position_embeddings,
-            "hidden_size": 20,
-            "num_hidden_layers": 2,
-            "num_attention_heads": 4,
-            "intermediate_size": 3 * 16,
-        }
-        if self.partial_rotary_factor_key is not None:
-            kwargs[self.partial_rotary_factor_key] = 1.0
+        kwargs = self.initialize_config_kwargs(
+            16,  # vocab_size
+            max_position_embeddings,
+            20,  # hidden_size
+            2,  # num_hidden_layers
+            4,  # num_attention_heads
+            48,  # intermediate_size
+        )
+        if self.set_partial_rotary_factor is not None:
+            self.set_partial_rotary_factor(kwargs, 1.0)
         kwargs.update(self.config_extra_kwargs(kwargs))
         _config = self.config_type(**kwargs)
         for rope_type in self.supported_rope_types:

@@ -16,8 +16,9 @@
 
 import datetime
 import unittest
+from typing import Dict, Any, Tuple
 
-from transformers import GPTJConfig, is_torch_available
+from transformers import GPTJConfig, is_torch_available, PretrainedConfig, PreTrainedModel
 from transformers.testing_utils import (
     require_torch,
     slow,
@@ -27,7 +28,7 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -338,8 +339,51 @@ class GPTJModelTester:
         return config, inputs_dict
 
 
+def gptj_initialize_config_kwargs(
+    self,
+    vocab_size: int,
+    max_position_embeddings: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    intermediate_size: int,
+) -> Dict[str, Any]:
+    return {
+        "vocab_size": vocab_size,
+        "n_positions": max_position_embeddings,
+        "n_embd": hidden_size,
+        "n_layer": num_hidden_layers,
+        "n_head": num_attention_heads,
+        "n_inner": intermediate_size,
+    }
+
+
+def gptj_set_partial_rotary_factor(self, kwargs, val):
+    head_size = kwargs["n_embd"] // kwargs["n_head"]
+    kwargs["rotary_dim"] = int(head_size * val)
+
+
+def gptj_get_rotary_ndims(self, config: PretrainedConfig) -> int:
+    rotary_ndims = config.rotary_dim
+    if rotary_ndims is None:
+        rotary_ndims = config.n_embd // config.n_head
+    return rotary_ndims
+
+
+def gptj_cos_sin_from_model(
+    self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    attn = model.h[0].attn
+    # From `models.gptj.modeling_gptj.GPTJAttention.forward`
+    embed_positions = attn._get_embed_positions(attn.embed_positions)
+    repeated_position_ids = position_ids.unsqueeze(-1).repeat(1, 1, embed_positions.shape[-1])
+    sincos = torch.gather(embed_positions, 1, repeated_position_ids)
+    sin, cos = torch.split(sincos, sincos.shape[-1] // 2, dim=-1)
+    return cos, sin
+
+
 @require_torch
-class GPTJModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class GPTJModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (
         (GPTJModel, GPTJForCausalLM, GPTJForSequenceClassification, GPTJForQuestionAnswering)
         if is_torch_available()
@@ -362,6 +406,13 @@ class GPTJModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin
     test_missing_keys = False
     test_model_parallel = False
     test_head_masking = False
+    # RoPETesterMixin
+    config_type = GPTJConfig
+    model_type = GPTJModel
+    initialize_config_kwargs = gptj_initialize_config_kwargs
+    set_partial_rotary_factor = gptj_set_partial_rotary_factor
+    get_rotary_ndims = gptj_get_rotary_ndims
+    cos_sin_from_model = gptj_cos_sin_from_model
 
     @unittest.skipIf(
         not is_torch_greater_or_equal_than_1_12, reason="PR #22069 made changes that require torch v1.12+."

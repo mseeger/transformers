@@ -18,7 +18,13 @@ import unittest
 
 import pytest
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, GlmConfig, is_torch_available
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    GlmConfig,
+    is_torch_available,
+    PretrainedConfig,
+)
 from transformers.testing_utils import (
     is_flaky,
     require_flash_attn,
@@ -279,6 +285,15 @@ class GlmModelTester:
         return config, inputs_dict
 
 
+def glm_set_partial_rotary_factor(self, kwargs, val):
+    kwargs["partial_rotary_factor"] = val
+
+
+def glm_get_rotary_ndims(self, config: PretrainedConfig) -> int:
+    head_size = config.hidden_size // config.num_attention_heads
+    return int (head_size * config.partial_rotary_factor)
+
+
 @require_torch
 class GlmModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (
@@ -302,7 +317,8 @@ class GlmModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin,
     # RoPETesterMixin
     config_type = GlmConfig
     model_type = GlmModel
-    partial_rotary_factor_key = "partial_rotary_factor"
+    set_partial_rotary_factor = glm_set_partial_rotary_factor
+    get_rotary_ndims = glm_get_rotary_ndims
     config_extra_kwargs = lambda self, config_kwargs: {"pad_token_id": 0}
 
     def setUp(self):

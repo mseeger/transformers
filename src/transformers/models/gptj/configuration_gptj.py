@@ -50,6 +50,8 @@ class GPTJConfig(PretrainedConfig):
             Number of attention heads for each attention layer in the Transformer encoder.
         rotary_dim (`int`, *optional*, defaults to 64):
             Number of dimensions in the embedding that Rotary Position Embedding is applied to.
+            If `rotary_dim=None`, RoPE is applied to the full size
+            `n_embd // n_head` (this is not the default).
         n_inner (`int`, *optional*, defaults to None):
             Dimensionality of the inner feed-forward layers. `None` will set it to 4 times n_embd
         activation_function (`str`, *optional*, defaults to `"gelu_new"`):

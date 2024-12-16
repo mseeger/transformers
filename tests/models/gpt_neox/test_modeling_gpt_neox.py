@@ -15,11 +15,10 @@
 """Testing suite for the PyTorch GPTNeoX model."""
 
 import unittest
-from typing import Dict, Any
 
 from parameterized import parameterized
 
-from transformers import AutoTokenizer, GPTNeoXConfig, is_torch_available, set_seed
+from transformers import AutoTokenizer, GPTNeoXConfig, is_torch_available, set_seed, PretrainedConfig
 from transformers.testing_utils import require_torch, slow, torch_device
 
 from ...generation.test_utils import GenerationTesterMixin
@@ -258,6 +257,15 @@ class GPTNeoXModelTester:
         return config, inputs_dict
 
 
+def gptneox_set_partial_rotary_factor(self, kwargs, val):
+    kwargs["rotary_pct"] = val
+
+
+def gptneox_get_rotary_ndims(self, config: PretrainedConfig) -> int:
+    head_size = config.hidden_size // config.num_attention_heads
+    return int (head_size * config.rotary_pct)
+
+
 @require_torch
 class GPTNeoXModelTest(
     ModelTesterMixin,
@@ -297,7 +305,8 @@ class GPTNeoXModelTest(
     # RoPETesterMixin:
     config_type = GPTNeoXConfig
     model_type = GPTNeoXModel
-    partial_rotary_factor_key = "rotary_pct"
+    set_partial_rotary_factor = gptneox_set_partial_rotary_factor
+    get_rotary_ndims = gptneox_get_rotary_ndims
 
     def setUp(self):
         self.model_tester = GPTNeoXModelTester(self)
