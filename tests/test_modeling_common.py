@@ -4993,9 +4993,11 @@ class RoPETesterMixin:
         if self.get_rotary_ndims is None:
             if self.set_partial_rotary_factor is not None:
                 raise ValueError("get_rotary_ndims must be given if set_partial_rotary_factor is given")
+            if self.initialize_config_kwargs is not None:
+                raise ValueError("If initialize_config_kwargs is given, so must be get_rotary_ndims (the default implementation does not work)")
+            # Works only if the corresponding fields are called `hidden_size` and
+            # `num_attention_heads`
             self.get_rotary_ndims = lambda config: config.hidden_size // config.num_attention_heads
-        elif self.set_partial_rotary_factor is None:
-            raise ValueError("set_partial_rotary_factor must be given if get_rotary_ndims is given")
         if self.initialize_config_kwargs is None:
             self.initialize_config_kwargs = _default_initialize_config_kwargs
 
@@ -5117,8 +5119,7 @@ class RoPETesterMixin:
                         **kwargs
                     )
                     self._update_config(config)
-                    head_size = config.hidden_size // config.num_attention_heads
-                    rotary_ndims = int(head_size * partial_rotary_factor)
+                    rotary_ndims = self.get_rotary_ndims(config)
                     model = self.model_type(config)
                     cos, sin = self.cos_sin_from_model(model, x, position_ids)
                     required_shape = (batch_size, seq_len, rotary_ndims)
@@ -5143,7 +5144,7 @@ class RoPETesterMixin:
                 **kwargs
             )
             self._update_config(config)
-            head_size = config.hidden_size // config.num_attention_heads
+            head_size = self.get_rotary_ndims(config)
             model = self.model_type(config)
             cos, sin = self.cos_sin_from_model(model, x, position_ids)
             required_shape = (batch_size, seq_len, head_size)

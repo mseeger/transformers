@@ -41,8 +41,8 @@ from transformers.utils import (
 )
 
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, _config_zero_init, floats_tensor, ids_tensor, sdpa_kernel
-
+from ...test_modeling_common import ModelTesterMixin, _config_zero_init, floats_tensor, ids_tensor, sdpa_kernel, \
+    RoPETesterMixin
 
 if is_torch_available():
     import torch
@@ -162,13 +162,16 @@ class MimiModelTester:
 
 
 @require_torch
-class MimiModelTest(ModelTesterMixin, unittest.TestCase):
+class MimiModelTest(ModelTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (MimiModel,) if is_torch_available() else ()
     is_encoder_decoder = True
     test_pruning = False
     test_headmasking = False
     test_resize_embeddings = False
     test_torchscript = False
+    # RoPETesterMixin
+    config_type = MimiConfig
+    model_type = MimiModel
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
         # model does support returning hidden states

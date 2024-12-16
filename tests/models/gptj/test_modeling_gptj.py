@@ -339,6 +339,19 @@ class GPTJModelTester:
         return config, inputs_dict
 
 
+# Copied from `transformers.models.gptj.modeling_gtpj`
+def prepare_rope_params_for_apply(
+    sin: torch.Tensor, cos: torch.Tensor, tsize: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    sin = torch.repeat_interleave(sin[:, :, None, :], 2, 3)
+    cos = torch.repeat_interleave(cos[:, :, None, :], 2, 3)
+    # Happens if `rotary_dim` is odd
+    if cos.shape[-1] > tsize:
+        cos = cos[..., :tsize]
+        sin = sin[..., :tsize]
+    return sin, cos
+
+
 def gptj_initialize_config_kwargs(
     self,
     vocab_size: int,
@@ -373,13 +386,18 @@ def gptj_get_rotary_ndims(self, config: PretrainedConfig) -> int:
 def gptj_cos_sin_from_model(
     self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if position_ids.dim() == 1:
+        position_ids = position_ids.unsqueeze(0)
     attn = model.h[0].attn
     # From `models.gptj.modeling_gptj.GPTJAttention.forward`
-    embed_positions = attn._get_embed_positions(attn.embed_positions)
+    embed_positions = attn._get_embed_positions(position_ids)
     repeated_position_ids = position_ids.unsqueeze(-1).repeat(1, 1, embed_positions.shape[-1])
     sincos = torch.gather(embed_positions, 1, repeated_position_ids)
     sin, cos = torch.split(sincos, sincos.shape[-1] // 2, dim=-1)
-    return cos, sin
+    config = attn.config
+    rotary_dim = config.rotary_dim or (config.n_embd // config.n_head)
+    sin, cos = prepare_rope_params_for_apply(sin, cos, rotary_dim)
+    return cos.squeeze(-2), sin.squeeze(-2)
 
 
 @require_torch

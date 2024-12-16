@@ -16,11 +16,19 @@
 
 import inspect
 import unittest
+from typing import Dict, Any, Tuple
 
 import pytest
 from parameterized import parameterized
 
-from transformers import BitsAndBytesConfig, IdeficsConfig, is_torch_available, is_vision_available
+from transformers import (
+    BitsAndBytesConfig,
+    IdeficsConfig,
+    is_torch_available,
+    is_vision_available,
+    PreTrainedModel,
+    PretrainedConfig,
+)
 from transformers.testing_utils import (
     TestCasePlus,
     is_pt_tf_cross_test,
@@ -35,7 +43,7 @@ from transformers.utils import cached_property
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor, random_attention_mask
+from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor, random_attention_mask, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -327,9 +335,48 @@ class IdeficsModelTester:
         self.skipTest(reason="Idefics has a hard requirement on SDPA, skipping this test")
 
 
+def idefics_initialize_config_kwargs(
+    self,
+    vocab_size: int,
+    max_position_embeddings: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    intermediate_size: int,
+) -> Dict[str, Any]:
+    return {
+        "HIER": vocab_size,
+        "HIER": max_position_embeddings,
+        "embed_dim": hidden_size,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
+        "intermediate_size": intermediate_size,
+    }
+
+def gptj_get_rotary_ndims(self, config: PretrainedConfig) -> int:
+    return config.embed_dim // config.num_attention_heads
+
+# HIER!!
+def gptj_cos_sin_from_model(
+    self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if position_ids.dim() == 1:
+        position_ids = position_ids.unsqueeze(0)
+    attn = model.h[0].attn
+    # From `models.gptj.modeling_gptj.GPTJAttention.forward`
+    embed_positions = attn._get_embed_positions(position_ids)
+    repeated_position_ids = position_ids.unsqueeze(-1).repeat(1, 1, embed_positions.shape[-1])
+    sincos = torch.gather(embed_positions, 1, repeated_position_ids)
+    sin, cos = torch.split(sincos, sincos.shape[-1] // 2, dim=-1)
+    config = attn.config
+    rotary_dim = config.rotary_dim or (config.n_embd // config.n_head)
+    sin, cos = prepare_rope_params_for_apply(sin, cos, rotary_dim)
+    return cos.squeeze(-2), sin.squeeze(-2)
+
+
 @unittest.skipIf(not is_torch_greater_or_equal_than_2_0, reason="pytorch 2.0 or higher is required")
 @require_torch
-class IdeficsModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class IdeficsModelTest(ModelTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (IdeficsModel, IdeficsForVisionText2Text) if is_torch_available() else ()
     pipeline_model_mapping = (
         {"feature-extraction": IdeficsModel, "image-text-to-text": IdeficsForVisionText2Text}
@@ -339,6 +386,9 @@ class IdeficsModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase)
     test_pruning = False
     test_headmasking = False
     test_torchscript = False
+    # RoPETesterMixin
+    config_type = IdeficsConfig
+    model_type = IdeficsModel
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
         inputs_dict = super()._prepare_for_class(inputs_dict, model_class, return_labels=return_labels)
