@@ -36,7 +36,6 @@ from ..olmo.test_modeling_olmo import (
     olmo_get_rotary_ndims,
     olmo_cos_sin_from_model,
     olmo_transform_rope_scaling,
-    olmo_initialize_config_kwargs,
 )
 
 
@@ -308,7 +307,6 @@ class OlmoeModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
     config_type = OlmoeConfig
     model_type = OlmoeModel
     supported_rope_types = ("linear", "dynamic")
-    initialize_config_kwargs = olmo_initialize_config_kwargs
     get_rotary_ndims = olmo_get_rotary_ndims
     transform_rope_scaling = olmo_transform_rope_scaling
 

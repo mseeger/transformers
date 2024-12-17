@@ -300,26 +300,6 @@ class GemmaModelTester:
         return config, inputs_dict
 
 
-def gemma_initialize_config_kwargs(
-    self,
-    vocab_size: int,
-    max_position_embeddings: int,
-    hidden_size: int,
-    num_hidden_layers: int,
-    num_attention_heads: int,
-    intermediate_size: int,
-) -> Dict[str, Any]:
-    return {
-        "vocab_size": vocab_size,
-        "max_position_embeddings": max_position_embeddings,
-        "hidden_size": hidden_size,
-        "num_hidden_layers": num_hidden_layers,
-        "num_attention_heads": num_attention_heads,
-        "num_key_value_heads": num_attention_heads,
-        "intermediate_size": intermediate_size,
-    }
-
-
 def gemma_cos_sin_from_model(
     self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -351,7 +331,6 @@ class GemmaModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
     # RoPETesterMixin
     config_type = GemmaConfig
     model_type = GemmaModel
-    initialize_config_kwargs = gemma_initialize_config_kwargs
     cos_sin_from_model = gemma_cos_sin_from_model
 
     # Need to remove 0.9 in `test_cpu_offload`

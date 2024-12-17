@@ -15,7 +15,7 @@
 """Testing suite for the PyTorch Mixtral model."""
 
 import unittest
-from typing import Dict, Any, Tuple
+from typing import Tuple
 
 import pytest
 
@@ -291,27 +291,6 @@ class MixtralModelTester:
         return config, inputs_dict
 
 
-def mixtral_initialize_config_kwargs(
-    self,
-    vocab_size: int,
-    max_position_embeddings: int,
-    hidden_size: int,
-    num_hidden_layers: int,
-    num_attention_heads: int,
-    intermediate_size: int,
-) -> Dict[str, Any]:
-    return {
-        "vocab_size": vocab_size,
-        "max_position_embeddings": max_position_embeddings,
-        "hidden_size": hidden_size,
-        "num_hidden_layers": num_hidden_layers,
-        "num_attention_heads": num_attention_heads,
-        "num_key_value_heads": num_attention_heads,
-        "intermediate_size": intermediate_size,
-        "head_dim": hidden_size // num_attention_heads,
-    }
-
-
 def mixtral_get_rotary_ndims(self, config: PretrainedConfig) -> int:
     return config.head_dim
 
@@ -363,7 +342,6 @@ class MixtralModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi
     # RoPETesterMixin
     config_type = MixtralConfig
     model_type = MixtralModel
-    initialize_config_kwargs = mixtral_initialize_config_kwargs
     get_rotary_ndims = mixtral_get_rotary_ndims
     cos_sin_from_model = mixtral_cos_sin_from_model
 

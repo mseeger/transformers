@@ -278,29 +278,8 @@ class OlmoModelTester:
         return config, inputs_dict
 
 
-def olmo_initialize_config_kwargs(
-    self,
-    vocab_size: int,
-    max_position_embeddings: int,
-    hidden_size: int,
-    num_hidden_layers: int,
-    num_attention_heads: int,
-    intermediate_size: int,
-) -> Dict[str, Any]:
-    return {
-        "vocab_size": vocab_size,
-        "max_position_embeddings": max_position_embeddings,
-        "hidden_size": hidden_size,
-        "num_hidden_layers": num_hidden_layers,
-        "num_attention_heads": num_attention_heads,
-        "num_key_value_heads": num_attention_heads,
-        "intermediate_size": intermediate_size,
-    }
-
-
 def olmo_get_rotary_ndims(self, config: PretrainedConfig) -> int:
-    head_size = config.hidden_size // config.num_attention_heads
-    return int(head_size * config.partial_rotary_factor)
+    return config.hidden_size // config.num_attention_heads
 
 
 def olmo_cos_sin_from_model(
@@ -314,7 +293,7 @@ def olmo_cos_sin_from_model(
 
 
 def olmo_transform_rope_scaling(
-    self, kwargs: Dict[str, Any]
+    self, kwargs: Dict[str, Any], config: PretrainedConfig,
 ) -> Dict[str, Any]:
     return {
         k: v
@@ -341,7 +320,6 @@ class OlmoModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin
     config_type = OlmoConfig
     model_type = OlmoModel
     supported_rope_types = ("linear", "dynamic")
-    initialize_config_kwargs = olmo_initialize_config_kwargs
     get_rotary_ndims = olmo_get_rotary_ndims
     cos_sin_from_model = olmo_cos_sin_from_model
     transform_rope_scaling = olmo_transform_rope_scaling

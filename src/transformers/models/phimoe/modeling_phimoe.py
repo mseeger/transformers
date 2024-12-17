@@ -162,7 +162,9 @@ class PhimoeRotaryEmbedding(nn.Module):
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
         self.rotary_ndims = config.hidden_size // config.num_attention_heads
 
-    def forward(self, x, seq_len=None):
+    def forward(self, x, seq_len: int):
+        if seq_len is None:
+            raise ValueError("seq_len must be given")
         mscale = None
         if self.config.rope_scaling and seq_len:
             mscale = (

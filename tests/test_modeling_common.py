@@ -4968,15 +4968,21 @@ class RoPETesterMixin:
     """
     config_type: type[PretrainedConfig] = None
     model_type: type[PreTrainedModel] = None
-    initialize_config_kwargs: Callable[[int, int, int, int, int, int], Dict[str, Any]] = None
-    set_partial_rotary_factor: Optional[Callable[[Dict[str, Any], float], None]] = None
+    initialize_config_kwargs: Callable[
+        [int, int, int, int, int, int], Dict[str, Any]
+    ] = None
+    set_partial_rotary_factor: Optional[Callable[
+        [Dict[str, Any], float], None
+    ]] = None
     get_rotary_ndims: Callable[[PretrainedConfig], int] = None
     supported_rope_types: Tuple[str] = None
     cos_sin_from_model: Callable[
         [PreTrainedModel, torch.Tensor, torch.Tensor],
         Tuple[torch.Tensor, torch.Tensor]
     ] = None
-    transform_rope_scaling: Callable[[Dict[str, Any]], Dict[str, Any]] = None
+    transform_rope_scaling: Callable[
+        [Dict[str, Any], PretrainedConfig], Dict[str, Any]
+    ] = None
 
     def _check_parameters(self):
         if self.config_type is None:
@@ -4996,7 +5002,7 @@ class RoPETesterMixin:
         if self.initialize_config_kwargs is None:
             self.initialize_config_kwargs = _default_initialize_config_kwargs
         if self.transform_rope_scaling is None:
-            self.transform_rope_scaling = lambda kwargs: kwargs
+            self.transform_rope_scaling = lambda kwargs, config: kwargs
 
     def _get_rope_scaling(
         self, rope_type: str, config: PretrainedConfig
@@ -5017,12 +5023,14 @@ class RoPETesterMixin:
             factors = [1.0] * factor_size
             result["short_factor"] = factors
             result["long_factor"] = factors
-        return self.transform_rope_scaling(result)
+        return self.transform_rope_scaling(result, config)
 
     @staticmethod
     def _update_config(config: PretrainedConfig):
         if hasattr(config, "head_dim"):
             config.head_dim = config.hidden_size // config.num_attention_heads
+        if hasattr(config, "num_key_value_heads") and hasattr(config, "num_attention_heads"):
+            config.num_key_value_heads = config.num_attention_heads
 
     def test_rope_forward_if_rotary_ndims_odd(self):
         # rotary_ndims = int(head_size * partial_rotary_factor) is the slice of the Q, K

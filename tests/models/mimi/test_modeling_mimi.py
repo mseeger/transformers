@@ -182,9 +182,7 @@ def mimi_initialize_config_kwargs(
         "hidden_size": hidden_size,
         "num_hidden_layers": num_hidden_layers,
         "num_attention_heads": num_attention_heads,
-        "num_key_value_heads": num_attention_heads,
         "intermediate_size": intermediate_size,
-        "head_dim": hidden_size // num_attention_heads,
     }
 
 

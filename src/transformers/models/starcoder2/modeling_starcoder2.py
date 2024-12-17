@@ -23,6 +23,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# TODO: This comment is wrong, modular_starcoder2 is very different from
+# modeling_starcoder2, there is lots more copy and paste here
 
 import math
 from typing import List, Optional, Tuple, Union
@@ -92,6 +94,7 @@ class Starcoder2RotaryEmbedding(nn.Module):
             self.rope_type = rope_type
             self.max_seq_len_cached = max_position_embeddings
             self.original_max_seq_len = max_position_embeddings
+            self.rotary_ndims = None
         else:
             # BC: "rope_type" was originally "type"
             if config.rope_scaling is not None:
@@ -100,6 +103,7 @@ class Starcoder2RotaryEmbedding(nn.Module):
                 self.rope_type = "default"
             self.max_seq_len_cached = config.max_position_embeddings
             self.original_max_seq_len = config.max_position_embeddings
+            self.rotary_ndims = config.hidden_size // config.num_attention_heads
 
         self.config = config
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
@@ -140,6 +144,9 @@ class Starcoder2RotaryEmbedding(nn.Module):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if rotary_ndims is odd
+            if self.config is not None and emb.shape[-1] > self.rotary_ndims:
+                emb = emb[..., :self.rotary_ndims]
             cos = emb.cos()
             sin = emb.sin()
 

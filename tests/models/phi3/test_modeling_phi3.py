@@ -25,7 +25,7 @@ from transformers import (
     StaticCache,
     is_torch_available,
     set_seed,
-    PreTrainedModel,
+    PreTrainedModel, PretrainedConfig,
 )
 from transformers.testing_utils import (
     require_torch,
@@ -333,7 +333,7 @@ class Phi3ModelTester:
 
 
 def phi3_transform_rope_scaling(
-    self, kwargs: Dict[str, Any]
+    self, kwargs: Dict[str, Any], config: PretrainedConfig,
 ) -> Dict[str, Any]:
     return {
         k: v

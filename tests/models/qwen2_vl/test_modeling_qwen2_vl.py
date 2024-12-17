@@ -16,6 +16,7 @@
 
 import gc
 import unittest
+from typing import Tuple
 
 import requests
 
@@ -25,6 +26,8 @@ from transformers import (
     Qwen2VLForConditionalGeneration,
     is_torch_available,
     is_vision_available,
+    Qwen2VLModel,
+    PreTrainedModel,
 )
 from transformers.testing_utils import (
     require_flash_attn,
@@ -40,7 +43,7 @@ from ...test_modeling_common import (
     ModelTesterMixin,
     _config_zero_init,
     floats_tensor,
-    ids_tensor,
+    ids_tensor, RoPETesterMixin,
 )
 
 
@@ -217,9 +220,21 @@ class Qwen2VLVisionText2TextModelTester:
             )["logits"]
         self.parent.assertFalse(torch.isnan(logits).any().item())
 
+def qwenv2vl_cos_sin_from_model(
+    self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if position_ids.dim() == 1:
+        position_ids = position_ids.unsqueeze(0)
+    position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+    rotary_emb = model.rotary_emb
+    cos, sin = rotary_emb(x, position_ids)
+    cos = cos[0]
+    sin = sin[0]
+    return cos, sin
+
 
 @require_torch
-class Qwen2VLModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
+class Qwen2VLModelTest(ModelTesterMixin, GenerationTesterMixin, RoPETesterMixin, unittest.TestCase):
     """
     Model tester for `Qwen2VLForConditionalGeneration`.
     """
@@ -229,6 +244,10 @@ class Qwen2VLModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCas
     pipeline_model_mapping = {"image-text-to-text": Qwen2VLForConditionalGeneration}
     test_pruning = False
     test_head_masking = False
+    # PipelineTesterMixine
+    config_type = Qwen2VLConfig
+    model_type = Qwen2VLModel
+    cos_sin_from_model = qwenv2vl_cos_sin_from_model
 
     def setUp(self):
         self.model_tester = Qwen2VLVisionText2TextModelTester(self)
