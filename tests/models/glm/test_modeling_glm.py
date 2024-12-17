@@ -15,6 +15,7 @@
 """Testing suite for the PyTorch Glm model."""
 
 import unittest
+from typing import Dict, Any
 
 import pytest
 
@@ -285,6 +286,27 @@ class GlmModelTester:
         return config, inputs_dict
 
 
+def glm_initialize_config_kwargs(
+    self,
+    vocab_size: int,
+    max_position_embeddings: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    intermediate_size: int,
+) -> Dict[str, Any]:
+    return {
+        "vocab_size": vocab_size,
+        "max_position_embeddings": max_position_embeddings,
+        "hidden_size": hidden_size,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
+        "num_key_value_heads": num_attention_heads,
+        "intermediate_size": intermediate_size,
+        "pad_token_id": 0,
+    }
+
+
 def glm_set_partial_rotary_factor(self, kwargs, val):
     kwargs["partial_rotary_factor"] = val
 
@@ -317,9 +339,9 @@ class GlmModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin,
     # RoPETesterMixin
     config_type = GlmConfig
     model_type = GlmModel
+    initialize_config_kwargs = glm_initialize_config_kwargs
     set_partial_rotary_factor = glm_set_partial_rotary_factor
     get_rotary_ndims = glm_get_rotary_ndims
-    config_extra_kwargs = lambda self, config_kwargs: {"pad_token_id": 0}
 
     def setUp(self):
         self.model_tester = GlmModelTester(self)

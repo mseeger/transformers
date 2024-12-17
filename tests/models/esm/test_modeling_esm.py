@@ -18,7 +18,7 @@ import unittest
 
 from transformers import EsmConfig, is_torch_available, PreTrainedModel
 from transformers.testing_utils import TestCasePlus, require_bitsandbytes, require_torch, slow, torch_device
-from typing import Tuple
+from typing import Tuple, Dict, Any
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, ids_tensor, random_attention_mask, RoPETesterMixin
@@ -182,6 +182,27 @@ class EsmModelTester:
         return config, inputs_dict
 
 
+def esm_initialize_config_kwargs(
+    self,
+    vocab_size: int,
+    max_position_embeddings: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    intermediate_size: int,
+) -> Dict[str, Any]:
+    return {
+        "vocab_size": vocab_size,
+        "max_position_embeddings": max_position_embeddings,
+        "hidden_size": hidden_size,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
+        "intermediate_size": intermediate_size,
+        "position_embedding_type": "rotary",
+        "pad_token_id": 0,
+    }
+
+
 def esm_cos_sin_from_model(
     self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -220,10 +241,7 @@ class EsmModelTest(ModelTesterMixin, PipelineTesterMixin, RoPETesterMixin, unitt
     # RoPETesterMixin
     config_type = EsmConfig
     model_type = EsmModel
-    config_extra_kwargs = lambda self, config_kwargs: {
-        "position_embedding_type": "rotary",
-        "pad_token_id": 0,
-    }
+    initialize_config_kwargs = esm_initialize_config_kwargs
     cos_sin_from_model = esm_cos_sin_from_model
 
     def setUp(self):

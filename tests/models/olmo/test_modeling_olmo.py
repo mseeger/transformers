@@ -299,7 +299,8 @@ def olmo_initialize_config_kwargs(
 
 
 def olmo_get_rotary_ndims(self, config: PretrainedConfig) -> int:
-    return config.hidden_size // config.num_attention_heads
+    head_size = config.hidden_size // config.num_attention_heads
+    return int(head_size * config.partial_rotary_factor)
 
 
 def olmo_cos_sin_from_model(

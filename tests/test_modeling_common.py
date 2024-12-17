@@ -4949,9 +4949,6 @@ class RoPETesterMixin:
        hidden_size, num_hidden_layers, num_attention_heads, intermediate_size)`
        returns parameters with which `config` object is created. See
        :func:`_default_initialize_config_kwargs` for the default.
-    - `config_extra_kwargs`: Optional. Additional parameters to be set in the
-      `config` object. This is a function `config_extra_kwargs(config_kwargs)`,
-      where the argument `config_kwargs` are the parameters set by the test
     - `set_partial_rotary_factor`: Some models implement partial RoPE, where
       embeddings are applied to an initial fraction along the sequence dimension
       only. If so, this function `set_partial_rotary_factor(kwargs, val)` sets
@@ -4972,7 +4969,6 @@ class RoPETesterMixin:
     config_type: type[PretrainedConfig] = None
     model_type: type[PreTrainedModel] = None
     initialize_config_kwargs: Callable[[int, int, int, int, int, int], Dict[str, Any]] = None
-    config_extra_kwargs: Callable[[Dict[str, Any]], Dict[str, Any]] = None
     set_partial_rotary_factor: Optional[Callable[[Dict[str, Any], float], None]] = None
     get_rotary_ndims: Callable[[PretrainedConfig], int] = None
     supported_rope_types: Tuple[str] = None
@@ -4987,8 +4983,6 @@ class RoPETesterMixin:
             raise ValueError("config_type must be set for RoPETesterMixin")
         if self.model_type is None:
             raise ValueError("model_type must be set for RoPETesterMixin")
-        if self.config_extra_kwargs is None:
-            self.config_extra_kwargs = lambda config_kwargs: dict()
         if self.supported_rope_types is None:
             self.supported_rope_types = tuple(ROPE_INIT_FUNCTIONS.keys())
         if self.cos_sin_from_model is None:
@@ -4996,8 +4990,6 @@ class RoPETesterMixin:
         if self.get_rotary_ndims is None:
             if self.set_partial_rotary_factor is not None:
                 raise ValueError("get_rotary_ndims must be given if set_partial_rotary_factor is given")
-            if self.initialize_config_kwargs is not None:
-                raise ValueError("If initialize_config_kwargs is given, so must be get_rotary_ndims (the default implementation does not work)")
             # Works only if the corresponding fields are called `hidden_size` and
             # `num_attention_heads`
             self.get_rotary_ndims = lambda config: config.hidden_size // config.num_attention_heads
@@ -5048,7 +5040,6 @@ class RoPETesterMixin:
                 48,  # intermediate_size
             )
             self.set_partial_rotary_factor(kwargs, 0.75)
-            kwargs.update(self.config_extra_kwargs(kwargs))
             # head_size = hidden_size // num_attention_heads = 4
             # rotary_ndims = int(head_size * rotary_pct) = 3
             _config = self.config_type(**kwargs)
@@ -5075,7 +5066,6 @@ class RoPETesterMixin:
         )
         if self.set_partial_rotary_factor is not None:
             self.set_partial_rotary_factor(kwargs, 1.0)
-        kwargs.update(self.config_extra_kwargs(kwargs))
         # head_size = hidden_size // num_attention_heads = 5
         _config = self.config_type(**kwargs)
         for rope_type in self.supported_rope_types:
@@ -5116,7 +5106,6 @@ class RoPETesterMixin:
                     48,  # intermediate_size
                 )
                 self.set_partial_rotary_factor(kwargs, partial_rotary_factor)
-                kwargs.update(self.config_extra_kwargs(kwargs))
                 _config = self.config_type(**kwargs)
                 for rope_type in self.supported_rope_types:
                     config = self.config_type(
@@ -5141,7 +5130,6 @@ class RoPETesterMixin:
         )
         if self.set_partial_rotary_factor is not None:
             self.set_partial_rotary_factor(kwargs, 1.0)
-        kwargs.update(self.config_extra_kwargs(kwargs))
         _config = self.config_type(**kwargs)
         for rope_type in self.supported_rope_types:
             config = self.config_type(
