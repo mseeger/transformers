@@ -242,7 +242,7 @@ class Olmo2FlashAttention2(OlmoFlashAttention2, Olmo2Attention):
     """
 
     def __init__(self, *args, **kwargs):
-        Olmo2Attention.__init__(*args, **kwargs)
+        Olmo2Attention.__init__(self, *args, **kwargs)
 
         # TODO: Should be removed once Flash Attention for RoCm is bumped to 2.1.
         # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
@@ -339,6 +339,9 @@ class Olmo2FlashAttention2(OlmoFlashAttention2, Olmo2Attention):
 
 
 class Olmo2SdpaAttention(OlmoSdpaAttention, Olmo2Attention):
+    def __init__(self, *args, **kwargs):
+        Olmo2Attention.__init__(self, *args, **kwargs)
+
     # Adapted from Olmo2Attention.forward
     def forward(
         self,
@@ -408,12 +411,20 @@ class Olmo2SdpaAttention(OlmoSdpaAttention, Olmo2Attention):
         return attn_output, None, past_key_value
 
 
+OLMO2_ATTENTION_CLASSES = {
+    "eager": Olmo2Attention,
+    "flash_attention_2": Olmo2FlashAttention2,
+    "sdpa": Olmo2SdpaAttention,
+}
+
+
 # The OLMo2 layers are identical to those of the OLMo model except:
 # - RMSNorm is used instead of standard layer norm.
 # - Norm is applied after attention/feedforward rather than before.
 class Olmo2DecoderLayer(OlmoDecoderLayer):
     def __init__(self, config: Olmo2Config, layer_idx: int):
         super().__init__(config, layer_idx=layer_idx)
+        self.self_attn = OLMO2_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
         self.post_attention_layernorm = Olmo2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_feedforward_layernorm = Olmo2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         del self.input_layernorm

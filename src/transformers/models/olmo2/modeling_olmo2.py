@@ -4,6 +4,9 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_olmo2.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+# TODO: This comment is not correct. This file is very different from
+# modular_olmo2. The latter inherits from modeling_olmo (which is clean), while
+# here, lots of code is just copied.
 import math
 from typing import List, Optional, Tuple, Union
 
@@ -56,6 +59,7 @@ class Olmo2RMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
+# TODO: Why is this different from olmo2_modular?
 # copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Olmo2
 # TODO(joao): add me back asap :)
 class Olmo2RotaryEmbedding(nn.Module):
@@ -82,6 +86,9 @@ class Olmo2RotaryEmbedding(nn.Module):
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
+            # Happens if self.rotary_ndims is odd
+            if emb.shape[-1] > self.dim:
+                emb = emb[..., :self.dim]
             cos = emb.cos()
             sin = emb.sin()
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
@@ -162,6 +169,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+# TODO: Why is this different from modular_olmo2?
 class Olmo2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -404,6 +412,8 @@ class Olmo2SdpaAttention(Olmo2Attention):
     `Olmo2Attention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
     SDPA API.
     """
+    def __init__(self, *args, **kwargs):
+        Olmo2Attention.__init__(self, *args, **kwargs)
 
     # Adapted from Olmo2Attention.forward
     def forward(

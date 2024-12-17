@@ -15,6 +15,7 @@
 """Testing suite for the PyTorch Mllama model."""
 
 import unittest
+from typing import Dict, Any, Tuple
 
 import pytest
 import requests
@@ -28,6 +29,9 @@ from transformers import (
     MllamaForConditionalGeneration,
     is_torch_available,
     is_vision_available,
+    MllamaTextModel,
+    PretrainedConfig,
+    PreTrainedModel,
 )
 from transformers.models.mllama.configuration_mllama import MllamaTextConfig
 from transformers.testing_utils import (
@@ -42,8 +46,7 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
-
+from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor, RoPETesterMixin
 
 if is_torch_available():
     import torch
@@ -116,8 +119,43 @@ class MllamaText2TextModelTester:
         self.parent.assertFalse(torch.isnan(logits).any().item())
 
 
+def mllama_initialize_config_kwargs(
+    self,
+    vocab_size: int,
+    max_position_embeddings: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    intermediate_size: int,
+) -> Dict[str, Any]:
+    return {
+        "vocab_size": vocab_size,
+        "max_position_embeddings": max_position_embeddings,
+        "hidden_size": hidden_size,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
+        "num_key_value_heads": num_attention_heads,
+        "intermediate_size": intermediate_size,
+        "pad_token_id": 0,
+    }
+
+
+def mllama_get_rotary_ndims(self, config: PretrainedConfig) -> int:
+    return config.hidden_size // config.num_attention_heads
+
+
+def mllama_cos_sin_from_model(
+    self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if position_ids.dim() == 1:
+        position_ids = position_ids.unsqueeze(0)
+    attn = model.layers[0].self_attn
+    rotary_emb = attn.rotary_emb
+    return rotary_emb(x, position_ids)
+
+
 @require_torch
-class MllamaForCausalLMModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
+class MllamaForCausalLMModelTest(ModelTesterMixin, GenerationTesterMixin, RoPETesterMixin, unittest.TestCase):
     """
     Model tester for `MllamaForConditionalGeneration`.
     """
@@ -126,6 +164,12 @@ class MllamaForCausalLMModelTest(ModelTesterMixin, GenerationTesterMixin, unitte
     all_generative_model_classes = (MllamaForCausalLM,) if is_torch_available() else ()
     test_pruning = False
     test_head_masking = False
+    # RoPETesterMixin
+    config_type = MllamaTextConfig
+    model_type = MllamaTextModel
+    initialize_config_kwargs = mllama_initialize_config_kwargs
+    get_rotary_ndims = mllama_get_rotary_ndims
+
 
     def setUp(self):
         self.model_tester = MllamaText2TextModelTester(self)

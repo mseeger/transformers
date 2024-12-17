@@ -4966,6 +4966,8 @@ class RoPETesterMixin:
       two tensors `x`, `position_ids`. The first is only used for `x.dtype`,
       `x.device`, in that `cos`. The second provides position indices of the
       input sequence(s), can be batched
+    - `transform_rope_scaling`: By default, `config.rope_scaling` is built by
+      :meth:`_get_rope_scaling` below. But some models need modifications
     """
     config_type: type[PretrainedConfig] = None
     model_type: type[PreTrainedModel] = None
@@ -4978,6 +4980,7 @@ class RoPETesterMixin:
         [PreTrainedModel, torch.Tensor, torch.Tensor],
         Tuple[torch.Tensor, torch.Tensor]
     ] = None
+    transform_rope_scaling: Callable[[Dict[str, Any]], Dict[str, Any]] = None
 
     def _check_parameters(self):
         if self.config_type is None:
@@ -5000,6 +5003,8 @@ class RoPETesterMixin:
             self.get_rotary_ndims = lambda config: config.hidden_size // config.num_attention_heads
         if self.initialize_config_kwargs is None:
             self.initialize_config_kwargs = _default_initialize_config_kwargs
+        if self.transform_rope_scaling is None:
+            self.transform_rope_scaling = lambda kwargs: kwargs
 
     def _get_rope_scaling(
         self, rope_type: str, config: PretrainedConfig
@@ -5020,7 +5025,7 @@ class RoPETesterMixin:
             factors = [1.0] * factor_size
             result["short_factor"] = factors
             result["long_factor"] = factors
-        return result
+        return self.transform_rope_scaling(result)
 
     @staticmethod
     def _update_config(config: PretrainedConfig):
