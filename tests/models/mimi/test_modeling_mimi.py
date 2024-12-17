@@ -18,13 +18,19 @@ import inspect
 import os
 import tempfile
 import unittest
+from typing import Dict, Any, Tuple
 
 import numpy as np
 from datasets import Audio, load_dataset
 from parameterized import parameterized
 from pytest import mark
 
-from transformers import AutoFeatureExtractor, MimiConfig
+from transformers import (
+    AutoFeatureExtractor,
+    MimiConfig,
+    PretrainedConfig,
+    PreTrainedModel,
+)
 from transformers.testing_utils import (
     is_flaky,
     is_torch_available,
@@ -161,6 +167,41 @@ class MimiModelTester:
         )
 
 
+def mimi_initialize_config_kwargs(
+    self,
+    vocab_size: int,
+    max_position_embeddings: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    intermediate_size: int,
+) -> Dict[str, Any]:
+    # TODO: vocab_size ??
+    return {
+        "max_position_embeddings": max_position_embeddings,
+        "hidden_size": hidden_size,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
+        "num_key_value_heads": num_attention_heads,
+        "intermediate_size": intermediate_size,
+        "head_dim": hidden_size // num_attention_heads,
+    }
+
+
+def mimi_get_rotary_ndims(self, config: PretrainedConfig) -> int:
+    return config.head_dim
+
+
+def mimi_cos_sin_from_model(
+    self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if position_ids.dim() == 1:
+        position_ids = position_ids.unsqueeze(0)
+    attn = model.layers[0].self_attention
+    rotary_emb = attn.rotary_emb
+    return rotary_emb(x, position_ids)
+
+
 @require_torch
 class MimiModelTest(ModelTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (MimiModel,) if is_torch_available() else ()
@@ -172,6 +213,8 @@ class MimiModelTest(ModelTesterMixin, RoPETesterMixin, unittest.TestCase):
     # RoPETesterMixin
     config_type = MimiConfig
     model_type = MimiModel
+    initialize_config_kwargs = mimi_initialize_config_kwargs
+    get_rotary_ndims = mimi_get_rotary_ndims
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
         # model does support returning hidden states

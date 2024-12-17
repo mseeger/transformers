@@ -300,6 +300,7 @@ def jetmoe_initialize_config_kwargs(
         "num_key_value_heads": num_attention_heads,
         "intermediate_size": intermediate_size,
         "kv_channels": hidden_size // num_attention_heads,
+        "num_experts_per_tok": 1,
     }
 
 

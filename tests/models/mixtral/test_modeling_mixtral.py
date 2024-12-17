@@ -15,10 +15,16 @@
 """Testing suite for the PyTorch Mixtral model."""
 
 import unittest
+from typing import Dict, Any, Tuple
 
 import pytest
 
-from transformers import MixtralConfig, is_torch_available
+from transformers import (
+    MixtralConfig,
+    is_torch_available,
+    PretrainedConfig,
+    PreTrainedModel,
+)
 from transformers.testing_utils import (
     require_flash_attn,
     require_torch,
@@ -29,7 +35,7 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -285,9 +291,48 @@ class MixtralModelTester:
         return config, inputs_dict
 
 
+def mixtral_initialize_config_kwargs(
+    self,
+    vocab_size: int,
+    max_position_embeddings: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    intermediate_size: int,
+) -> Dict[str, Any]:
+    return {
+        "vocab_size": vocab_size,
+        "max_position_embeddings": max_position_embeddings,
+        "hidden_size": hidden_size,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
+        "num_key_value_heads": num_attention_heads,
+        "intermediate_size": intermediate_size,
+        "head_dim": hidden_size // num_attention_heads,
+    }
+
+
+def mixtral_get_rotary_ndims(self, config: PretrainedConfig) -> int:
+    return config.head_dim
+
+
+def mixtral_cos_sin_from_model(
+    self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if position_ids.dim() == 1:
+        position_ids = position_ids.unsqueeze(0)
+    attn = model.layers[0].self_attn
+    rotary_emb = attn.rotary_emb
+    seq_len = position_ids.flatten().max().int() + 1
+    cos, sin = rotary_emb(x, seq_len=seq_len)
+    cos = cos[position_ids]
+    sin = sin[position_ids]
+    return cos, sin
+
+
 @require_torch
 # Copied from tests.models.mistral.test_modeling_mistral.MistralModelTest with Mistral->Mixtral
-class MixtralModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class MixtralModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (
         (
             MixtralModel,
@@ -315,6 +360,12 @@ class MixtralModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMi
     test_headmasking = False
     test_pruning = False
     fx_compatible = True
+    # RoPETesterMixin
+    config_type = MixtralConfig
+    model_type = MixtralModel
+    initialize_config_kwargs = mixtral_initialize_config_kwargs
+    get_rotary_ndims = mixtral_get_rotary_ndims
+    cos_sin_from_model = mixtral_cos_sin_from_model
 
     # TODO (ydshieh): Check this. See https://app.circleci.com/pipelines/github/huggingface/transformers/79245/workflows/9490ef58-79c2-410d-8f51-e3495156cf9c/jobs/1012146
     def is_pipeline_test_to_skip(

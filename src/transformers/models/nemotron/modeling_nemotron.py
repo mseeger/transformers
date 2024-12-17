@@ -279,7 +279,6 @@ class NemotronAttention(nn.Module):
         query_pass = query_states[..., self.rotary_ndims :]
         key_rot = key_states[..., : self.rotary_ndims]
         key_pass = key_states[..., self.rotary_ndims :]
-
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(
             query_rot, key_rot, cos, sin
@@ -346,6 +345,8 @@ class NemotronFlashAttention2(NemotronAttention):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if position_embeddings is None:
+            raise ValueError("position_embeddings = (cos, sin) is required")
         if isinstance(past_key_value, StaticCache):
             raise ValueError(
                 "`static` cache implementation is not compatible with `attn_implementation==flash_attention_2` "
@@ -367,9 +368,17 @@ class NemotronFlashAttention2(NemotronAttention):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        if position_embeddings is not None:
-            cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        # Compute rotary embeddings on rotary_ndims
+        query_rot = query_states[..., : self.rotary_ndims]
+        query_pass = query_states[..., self.rotary_ndims :]
+        key_rot = key_states[..., : self.rotary_ndims]
+        key_pass = key_states[..., self.rotary_ndims :]
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(
+            query_rot, key_rot, cos, sin
+        )
+        query_states = torch.cat((query_states, query_pass), dim=-1)
+        key_states = torch.cat((key_states, key_pass), dim=-1)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -453,6 +462,8 @@ class NemotronSdpaAttention(NemotronAttention):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if position_embeddings is None:
+            raise ValueError("position_embeddings = (cos, sin) is required")
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
             logger.warning_once(
@@ -480,9 +491,17 @@ class NemotronSdpaAttention(NemotronAttention):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        if position_embeddings is not None:
-            cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        # Compute rotary embeddings on rotary_ndims
+        query_rot = query_states[..., : self.rotary_ndims]
+        query_pass = query_states[..., self.rotary_ndims :]
+        key_rot = key_states[..., : self.rotary_ndims]
+        key_pass = key_states[..., self.rotary_ndims :]
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(
+            query_rot, key_rot, cos, sin
+        )
+        query_states = torch.cat((query_states, query_pass), dim=-1)
+        key_states = torch.cat((key_states, key_pass), dim=-1)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -547,13 +566,13 @@ class NemotronDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -585,13 +604,13 @@ class NemotronDecoderLayer(nn.Module):
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
-            position_embeddings=position_embeddings,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -848,13 +867,13 @@ class NemotronModel(NemotronPreTrainedModel):
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
+                    position_embeddings=position_embeddings,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
-                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
