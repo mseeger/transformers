@@ -339,26 +339,6 @@ class PhimoeModelTester:
         return config, inputs_dict
 
 
-def phimoe_initialize_config_kwargs(
-    self,
-    vocab_size: int,
-    max_position_embeddings: int,
-    hidden_size: int,
-    num_hidden_layers: int,
-    num_attention_heads: int,
-    intermediate_size: int,
-) -> Dict[str, Any]:
-    return {
-        "vocab_size": vocab_size,
-        "max_position_embeddings": max_position_embeddings,
-        "hidden_size": hidden_size,
-        "num_hidden_layers": num_hidden_layers,
-        "num_attention_heads": num_attention_heads,
-        "num_key_value_heads": num_attention_heads,
-        "intermediate_size": intermediate_size,
-    }
-
-
 def phimoe_transform_rope_scaling(
     self, kwargs: Dict[str, Any], config: PretrainedConfig,
 ) -> Dict[str, Any]:
@@ -405,7 +385,6 @@ class PhimoeModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMix
     config_type = PhimoeConfig
     model_type = PhimoeModel
     transform_rope_scaling = phimoe_transform_rope_scaling
-    initialize_config_kwargs = phimoe_initialize_config_kwargs
     cos_sin_from_model = phimoe_cos_sin_from_model
 
     # TODO (ydshieh): Check this. See https://app.circleci.com/pipelines/github/huggingface/transformers/79292/workflows/fa2ba644-8953-44a6-8f67-ccd69ca6a476/jobs/1012905
