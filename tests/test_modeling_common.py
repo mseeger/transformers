@@ -4936,6 +4936,12 @@ def _default_initialize_config_kwargs(
     }
 
 
+def _default_input_to_model_forward(
+    input_ids: torch.Tensor,
+    config: PretrainedConfig,
+) -> torch.Tensor:
+    return
+
 @require_torch
 class RoPETesterMixin:
     """
@@ -4965,6 +4971,8 @@ class RoPETesterMixin:
       input sequence(s), can be batched
     - `transform_rope_scaling`: By default, `config.rope_scaling` is built by
       :meth:`_get_rope_scaling` below. But some models need modifications
+    - `input_to_model_forward`: By default, a transformer model takes token
+      indices `input_ids` as input directly, but some do not
     """
     config_type: type[PretrainedConfig] = None
     model_type: type[PreTrainedModel] = None
@@ -4982,6 +4990,9 @@ class RoPETesterMixin:
     ] = None
     transform_rope_scaling: Callable[
         [Dict[str, Any], PretrainedConfig], Dict[str, Any]
+    ] = None
+    input_to_model_forward: Callable[
+        [torch.Tensor, PretrainedConfig], torch.Tensor
     ] = None
 
     def _check_parameters(self):
@@ -5003,6 +5014,8 @@ class RoPETesterMixin:
             self.initialize_config_kwargs = _default_initialize_config_kwargs
         if self.transform_rope_scaling is None:
             self.transform_rope_scaling = lambda kwargs, config: kwargs
+        if self.input_to_model_forward is None:
+            self.input_to_model_forward = lambda input_ids, config: input_ids
 
     def _get_rope_scaling(
         self, rope_type: str, config: PretrainedConfig
@@ -5012,7 +5025,7 @@ class RoPETesterMixin:
             "rope_type": rope_type,
             "factor": 1.5,
         }
-        if rope_type in ("dynamic", "logrope", "llama3"):
+        if rope_type in ("dynamic", "logrope", "llama3") and hasattr(config, "max_position_embeddings"):
             result["original_max_position_embeddings"] = config.max_position_embeddings // 2
         if rope_type == "llama3":
             result["low_freq_factor"] = 0.5
@@ -5036,12 +5049,14 @@ class RoPETesterMixin:
         # rotary_ndims = int(head_size * partial_rotary_factor) is the slice of the Q, K
         # tensors on which RoPE embeddings are applied to. This can be odd,
         # and forward should work then.
+        max_position_embeddings = 16
+        vocab_size = 16
         self._check_parameters()
         if self.set_partial_rotary_factor is not None:
             # rotary_ndims odd due to partial_rotary_factor
             kwargs = self.initialize_config_kwargs(
-                16,  # vocab_size
-                16,  # max_position_embeddings
+                vocab_size,
+                max_position_embeddings,
                 16,  # hidden_size
                 2,   # num_hidden_layers
                 4,   # num_attention_heads
@@ -5059,14 +5074,15 @@ class RoPETesterMixin:
                 self._update_config(config)
                 model = self.model_type(config)
                 input_ids = torch.randint(
-                    0, config.vocab_size, (1, config.max_position_embeddings)
+                    0, vocab_size, (1, max_position_embeddings)
                 )
+                input_ids = self.input_to_model_forward(input_ids, config)
                 logits = model(input_ids).last_hidden_state
                 print(f"logits.shape = {logits.shape}")
         # rotary_ndims == head_size is odd
         kwargs = self.initialize_config_kwargs(
-            16,  # vocab_size
-            16,  # max_position_embeddings
+            vocab_size,
+            max_position_embeddings,
             20,  # hidden_size
             2,  # num_hidden_layers
             4,  # num_attention_heads
@@ -5084,8 +5100,9 @@ class RoPETesterMixin:
             self._update_config(config)
             model = self.model_type(config)
             input_ids = torch.randint(
-                0, config.vocab_size, (1, config.max_position_embeddings)
+                0, vocab_size, (1, max_position_embeddings)
             )
+            input_ids = self.input_to_model_forward(input_ids, config)
             logits = model(input_ids).last_hidden_state
             print(f"logits.shape = {logits.shape}")
 
@@ -5098,6 +5115,7 @@ class RoPETesterMixin:
         max_position_embeddings = 16
         seq_len = 12
         batch_size = 3
+        vocab_size = 16
         x = torch.randn((1,))
         position_ids = torch.randint(
             0, max_position_embeddings, (batch_size, seq_len)
@@ -5106,7 +5124,7 @@ class RoPETesterMixin:
             # rotary_ndims odd due to partial_rotary_factor
             for partial_rotary_factor in (0.25, 0.5, 0.75, 1.0):
                 kwargs = self.initialize_config_kwargs(
-                    16,  # vocab_size
+                    vocab_size,
                     max_position_embeddings,
                     16,  # hidden_size
                     2,  # num_hidden_layers
@@ -5129,7 +5147,7 @@ class RoPETesterMixin:
                     self.assertEqual(sin.shape, required_shape)
         # rotary_ndims == head_size is odd
         kwargs = self.initialize_config_kwargs(
-            16,  # vocab_size
+            vocab_size,
             max_position_embeddings,
             20,  # hidden_size
             2,  # num_hidden_layers

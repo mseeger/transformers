@@ -15,8 +15,9 @@
 """Testing suite for the PyTorch DBRX model."""
 
 import unittest
+from typing import Tuple
 
-from transformers import DbrxConfig, is_torch_available
+from transformers import DbrxConfig, is_torch_available, PreTrainedModel
 from transformers.testing_utils import require_torch, slow, torch_device
 
 from ...generation.test_utils import GenerationTesterMixin
@@ -319,6 +320,14 @@ class DbrxModelTester:
         return config, inputs_dict
 
 
+def dbrx_cos_sin_from_model(
+    self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    rotary_emb = model.blocks[0].norm_attn_norm.attn.rotary_emb
+    cos, sin = rotary_emb(x, position_ids)
+    return cos, sin
+
+
 @require_torch
 class DbrxModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (DbrxModel, DbrxForCausalLM) if is_torch_available() else ()
@@ -329,7 +338,7 @@ class DbrxModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin
     # RoPETesterMixin
     config_type = DbrxConfig
     model_type = DbrxModel
-    embedding_from_model = lambda self, model: model.blocks[0].norm_attn_norm.attn
+    cos_sin_from_model = dbrx_cos_sin_from_model
 
     def setUp(self):
         self.model_tester = DbrxModelTester(self)

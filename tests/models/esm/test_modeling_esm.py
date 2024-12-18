@@ -206,8 +206,13 @@ def esm_initialize_config_kwargs(
 def esm_cos_sin_from_model(
     self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if position_ids.dim() == 1:
+        position_ids = position_ids.unsqueeze(0)
     rotary_emb = model.encoder.layer[0].attention.self.rotary_embeddings
-    return rotary_emb._update_cos_sin_tables(position_ids, seq_dimension=-1)
+    cos, sin = rotary_emb._update_cos_sin_tables(x, position_ids)
+    cos = cos.squeeze(1)
+    sin = sin.squeeze(1)
+    return cos, sin
 
 
 @require_torch

@@ -31,6 +31,7 @@ from transformers import (
     PretrainedConfig,
     PreTrainedModel,
 )
+from transformers.models.mimi.modeling_mimi import MimiTransformerModel
 from transformers.testing_utils import (
     is_flaky,
     is_torch_available,
@@ -176,7 +177,6 @@ def mimi_initialize_config_kwargs(
     num_attention_heads: int,
     intermediate_size: int,
 ) -> Dict[str, Any]:
-    # TODO: vocab_size ??
     return {
         "max_position_embeddings": max_position_embeddings,
         "hidden_size": hidden_size,
@@ -186,18 +186,24 @@ def mimi_initialize_config_kwargs(
     }
 
 
-def mimi_get_rotary_ndims(self, config: PretrainedConfig) -> int:
-    return config.head_dim
-
-
 def mimi_cos_sin_from_model(
     self, model: PreTrainedModel, x: torch.Tensor, position_ids: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if position_ids.dim() == 1:
         position_ids = position_ids.unsqueeze(0)
-    attn = model.layers[0].self_attention
-    rotary_emb = attn.rotary_emb
+    rotary_emb = model.layers[0].self_attn.rotary_emb
     return rotary_emb(x, position_ids)
+
+
+def mimi_input_to_model_forward(
+    self, input_ids: torch.Tensor, config: PretrainedConfig,
+) -> torch.Tensor:
+    # Model needs embeddings as input
+    if input_ids.dim() == 1:
+        input_ids.unsqueeze(0)
+    return torch.zeros((1, 1, 1)).expand(
+        *input_ids.shape, config.hidden_size
+    )
 
 
 @require_torch
@@ -210,9 +216,10 @@ class MimiModelTest(ModelTesterMixin, RoPETesterMixin, unittest.TestCase):
     test_torchscript = False
     # RoPETesterMixin
     config_type = MimiConfig
-    model_type = MimiModel
+    model_type = MimiTransformerModel
     initialize_config_kwargs = mimi_initialize_config_kwargs
-    get_rotary_ndims = mimi_get_rotary_ndims
+    cos_sin_from_model = mimi_cos_sin_from_model
+    input_to_model_forward = mimi_input_to_model_forward
 
     def _prepare_for_class(self, inputs_dict, model_class, return_labels=False):
         # model does support returning hidden states

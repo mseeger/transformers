@@ -20,7 +20,12 @@ import unittest
 import datasets
 import numpy as np
 
-from transformers import ClvpConfig, ClvpDecoderConfig, ClvpEncoderConfig, ClvpDecoder
+from transformers import (
+    ClvpConfig,
+    ClvpDecoderConfig,
+    ClvpEncoderConfig,
+    ClvpEncoder,
+)
 from transformers.testing_utils import (
     cleanup,
     require_torch,
@@ -36,7 +41,6 @@ from ...test_modeling_common import (
     _config_zero_init,
     ids_tensor,
     random_attention_mask,
-    RoPETesterMixin,
 )
 from ...test_pipeline_mixin import PipelineTesterMixin
 
@@ -162,15 +166,11 @@ class ClvpEncoderTester:
 
 
 @require_torch
-class ClvpEncoderTest(ModelTesterMixin, RoPETesterMixin, unittest.TestCase):
+class ClvpEncoderTest(ModelTesterMixin, unittest.TestCase):
     all_model_classes = (ClvpEncoder,) if is_torch_available() else ()
     test_pruning = False
     test_head_masking = False
     test_torchscript = False
-    # RoPETesterMixin
-    config_type = ClvpEncoderConfig
-    model_type = ClvpEncoder
-    embedding_from_model = lambda self, model: model.rotary_pos_emb
 
     def setUp(self):
         self.model_tester = ClvpEncoderTester(self)

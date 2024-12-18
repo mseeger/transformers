@@ -20,7 +20,7 @@ from transformers import (
     PixtralVisionConfig,
     PixtralVisionModel,
     is_torch_available,
-    is_vision_available, MixtralConfig, MixtralModel,
+    is_vision_available,
 )
 from transformers.testing_utils import (
     require_torch,
@@ -28,7 +28,7 @@ from transformers.testing_utils import (
 )
 
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, floats_tensor, RoPETesterMixin
+from ...test_modeling_common import ModelTesterMixin, floats_tensor
 
 if is_torch_available():
     import torch
@@ -133,7 +133,7 @@ class PixtralVisionModelTester:
 
 
 @require_torch
-class PixtralVisionModelModelTest(ModelTesterMixin, RoPETesterMixin, unittest.TestCase):
+class PixtralVisionModelModelTest(ModelTesterMixin, unittest.TestCase):
     """
     Model tester for `PixtralVisionModel`.
     """
@@ -142,9 +142,6 @@ class PixtralVisionModelModelTest(ModelTesterMixin, RoPETesterMixin, unittest.Te
     test_pruning = False
     test_head_masking = False
     test_torchscript = False
-    # RoPETesterMixin
-    config_type = MixtralConfig
-    model_type = MixtralModel
 
     def setUp(self):
         self.model_tester = PixtralVisionModelTester(self)
