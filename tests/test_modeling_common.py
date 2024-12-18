@@ -5041,7 +5041,10 @@ class RoPETesterMixin:
     @staticmethod
     def _update_config(config: PretrainedConfig):
         if hasattr(config, "head_dim"):
-            config.head_dim = config.hidden_size // config.num_attention_heads
+            try:
+                config.head_dim = config.hidden_size // config.num_attention_heads
+            except AttributeError:
+                pass
         if hasattr(config, "num_key_value_heads") and hasattr(config, "num_attention_heads"):
             config.num_key_value_heads = config.num_attention_heads
 
