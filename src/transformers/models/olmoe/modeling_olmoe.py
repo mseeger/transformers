@@ -12,7 +12,6 @@
 """PyTorch OLMoE model."""
 
 import math
-from multiprocessing.managers import Value
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -449,6 +448,8 @@ class OlmoeFlashAttention2(OlmoeAttention):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if position_embeddings is None:
+            raise ValueError("position_embeddings = (cos, sin) must be given")
         output_attentions = False
 
         bsz, q_len, _ = hidden_states.size()
@@ -549,6 +550,8 @@ class OlmoeSdpaAttention(OlmoeAttention):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if position_embeddings is None:
+            raise ValueError("position_embeddings = (cos, sin) must be given")
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
             logger.warning_once(
@@ -1009,6 +1012,7 @@ class OlmoeModel(OlmoePreTrainedModel):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
+                    position_embeddings,
                     causal_mask,
                     position_ids,
                     past_key_values,
@@ -1016,11 +1020,11 @@ class OlmoeModel(OlmoePreTrainedModel):
                     output_router_logits,
                     use_cache,
                     cache_position,
-                    position_embeddings,
                 )
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
+                    position_embeddings=position_embeddings,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
@@ -1028,7 +1032,6 @@ class OlmoeModel(OlmoePreTrainedModel):
                     output_router_logits=output_router_logits,
                     use_cache=use_cache,
                     cache_position=cache_position,
-                    position_embeddings=position_embeddings,
                 )
 
             hidden_states = layer_outputs[0]
