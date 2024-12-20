@@ -30,8 +30,13 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
+from ..olmo.test_modeling_olmo import (
+    olmo_get_rotary_ndims,
+    olmo_cos_sin_from_model,
+    olmo_transform_rope_scaling,
+)
 
 
 if is_torch_available():
@@ -285,7 +290,7 @@ class OlmoeModelTester:
 
 
 @require_torch
-class OlmoeModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class OlmoeModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (OlmoeModel, OlmoeForCausalLM) if is_torch_available() else ()
     all_generative_model_classes = (OlmoeForCausalLM,) if is_torch_available() else ()
     pipeline_model_mapping = (
@@ -298,6 +303,12 @@ class OlmoeModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixi
     )
     test_pruning = False
     fx_compatible = False
+    # RoPETesterMixin
+    config_type = OlmoeConfig
+    model_type = OlmoeModel
+    supported_rope_types = ("linear", "dynamic")
+    get_rotary_ndims = olmo_get_rotary_ndims
+    transform_rope_scaling = olmo_transform_rope_scaling
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer

@@ -75,6 +75,11 @@ def apply_rotary_pos_emb(tensor: tf.Tensor, sincos: tf.Tensor) -> tf.Tensor:
     sin_pos, cos_pos = sincos
     sin_pos = tf.repeat(sin_pos[:, :, None, :], 2, 3)
     cos_pos = tf.repeat(cos_pos[:, :, None, :], 2, 3)
+    emb_size = tensor.shape[-1]
+    # Happens if `emb_size` is odd
+    if cos_pos.shape[-1] > emb_size:
+        cos_pos = cos_pos[:, :, :, :emb_size]
+        sin_pos = sin_pos[:, :, :, :emb_size]
     return (tensor * cos_pos) + (rotate_every_two(tensor) * sin_pos)
 
 

@@ -30,7 +30,6 @@ from transformers.testing_utils import (
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor
 
-
 if is_torch_available():
     import torch
 

@@ -42,7 +42,6 @@ from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
 
-
 if is_torch_available():
     import torch
 
@@ -193,7 +192,6 @@ class AriaForConditionalGenerationModelTest(ModelTesterMixin, GenerationTesterMi
     all_generative_model_classes = (AriaForConditionalGeneration,) if is_torch_available() else ()
     test_pruning = False
     test_head_masking = False
-    _is_composite = True
 
     def setUp(self):
         self.model_tester = AriaVisionText2TextModelTester(self)

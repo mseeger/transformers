@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """RecurrentGemma model configuration"""
+import math
+
+import math
 
 from ...configuration_utils import PretrainedConfig
 from ...utils import logging
@@ -155,4 +158,6 @@ class RecurrentGemmaConfig(PretrainedConfig):
 
     @property
     def layers_block_type(self):
-        return (self.block_types * 100)[: self.num_hidden_layers]
+        len_bt = len(self.block_types)
+        sz = int(math.ceil(self.num_hidden_layers / len_bt))
+        return (self.block_types * sz)[: self.num_hidden_layers]

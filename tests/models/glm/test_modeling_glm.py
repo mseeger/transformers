@@ -15,10 +15,17 @@
 """Testing suite for the PyTorch Glm model."""
 
 import unittest
+from typing import Dict, Any
 
 import pytest
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, GlmConfig, is_torch_available
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    GlmConfig,
+    is_torch_available,
+    PretrainedConfig,
+)
 from transformers.testing_utils import (
     is_flaky,
     require_flash_attn,
@@ -31,7 +38,7 @@ from transformers.testing_utils import (
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, ids_tensor
+from ...test_modeling_common import ModelTesterMixin, ids_tensor, RoPETesterMixin
 from ...test_pipeline_mixin import PipelineTesterMixin
 
 
@@ -279,8 +286,37 @@ class GlmModelTester:
         return config, inputs_dict
 
 
+def glm_initialize_config_kwargs(
+    self,
+    vocab_size: int,
+    max_position_embeddings: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    intermediate_size: int,
+) -> Dict[str, Any]:
+    return {
+        "vocab_size": vocab_size,
+        "max_position_embeddings": max_position_embeddings,
+        "hidden_size": hidden_size,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
+        "intermediate_size": intermediate_size,
+        "pad_token_id": 0,
+    }
+
+
+def glm_set_partial_rotary_factor(self, kwargs, val):
+    kwargs["partial_rotary_factor"] = val
+
+
+def glm_get_rotary_ndims(self, config: PretrainedConfig) -> int:
+    head_size = config.hidden_size // config.num_attention_heads
+    return int(head_size * config.partial_rotary_factor)
+
+
 @require_torch
-class GlmModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class GlmModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, RoPETesterMixin, unittest.TestCase):
     all_model_classes = (
         (GlmModel, GlmForCausalLM, GlmForSequenceClassification, GlmForTokenClassification)
         if is_torch_available()
@@ -299,6 +335,12 @@ class GlmModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin,
     )
     test_headmasking = False
     test_pruning = False
+    # RoPETesterMixin
+    config_type = GlmConfig
+    model_type = GlmModel
+    initialize_config_kwargs = glm_initialize_config_kwargs
+    set_partial_rotary_factor = glm_set_partial_rotary_factor
+    get_rotary_ndims = glm_get_rotary_ndims
 
     def setUp(self):
         self.model_tester = GlmModelTester(self)
