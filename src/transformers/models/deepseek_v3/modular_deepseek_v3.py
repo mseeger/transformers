@@ -134,7 +134,7 @@ class DeepseekV3MoE(nn.Module):
 
     def moe(self, hidden_states: torch.Tensor, topk_indices: torch.Tensor, topk_weights: torch.Tensor):
         final_hidden_states = torch.zeros_like(hidden_states, dtype=topk_weights.dtype)
-        expert_mask = torch.nn.functional.one_hot(topk_indices, num_classes=len(self.experts))
+        expert_mask = F.one_hot(topk_indices, num_classes=len(self.experts))
         expert_mask = expert_mask.permute(2, 0, 1)
 
         for expert_idx in range(len(self.experts)):
@@ -286,8 +286,6 @@ class DeepseekV3EfficientAttention(nn.Module):
         self.qk_rope_head_dim = config.qk_rope_head_dim
         self.kv_lora_rank = config.kv_lora_rank
         self.v_head_dim = config.v_head_dim
-        self.qk_nope_head_dim = config.qk_nope_head_dim
-        self.qk_head_dim = config.qk_head_dim
         self.is_causal = True
 
         # Maps input X to low-rank C_KV, K_R, C_Q
@@ -320,7 +318,7 @@ class DeepseekV3EfficientAttention(nn.Module):
         self.q_a_layernorm = DeepseekV3RMSNorm(config.q_lora_rank)
         self.kv_a_layernorm = DeepseekV3RMSNorm(self.kv_lora_rank)
 
-        self.scaling = self.qk_head_dim ** (-0.5)
+        self.scaling = config.qk_head_dim ** (-0.5)
         if self.config.rope_scaling is not None:
             mscale_all_dim = self.config.rope_scaling.get("mscale_all_dim", 0)
             scaling_factor = self.config.rope_scaling["factor"]
@@ -337,33 +335,28 @@ class DeepseekV3EfficientAttention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        batch_size, seq_length = hidden_states.shape[:-1]
-        # TODO: Needed?
-        query_shape = (batch_size, seq_length, -1, self.qk_head_dim)
-        key_shape = (batch_size, seq_length, -1, self.qk_nope_head_dim + self.v_head_dim)
-
+        batch_size, seq_length, _ = hidden_states.shape
         # Initial map to [C_KV, K_R, C_Q]
         c_kv, k_r, c_q = self.qkv_encode(hidden_states).split(
             (self.kv_lora_rank, self.qk_rope_head_dim, self.q_lora_rank), dim=-1
         )
         c_kv = self.kv_a_layernorm(c_kv)
         c_q = self.q_a_layernorm(c_q)
-
         # Map to Q equivalent
         q_nope, q_r = self.q_decode(c_q).split(
             (self.kv_lora_rank, self.qk_rope_head_dim), dim=-1
         )
-
         # RoPE
         cos, sin = position_embeddings
         q_r, k_r = apply_rotary_pos_emb(q_r, k_r, cos, sin)
-
         # Reshape and transpose
+        kv_cache_dim = self.kv_lora_rank + self.qk_rope_head_dim
         k_equiv = torch.cat((c_kv, k_r), dim=-1).view(
-            batch_size, 1, seq_length, self.qk_head_dim
+            batch_size, 1, seq_length, kv_cache_dim
         )
         q_equiv = torch.cat((q_nope, q_r), dim=-1).view(
-            batch_size, seq_length, self.num_heads, self.qk_head_dim).transpose(1, 2)
+            batch_size, seq_length, self.num_heads, kv_cache_dim
+        ).transpose(1, 2)
         v_equiv = k_equiv[..., :self.kv_lora_rank]
         # q_equiv: (batch_size, num_heads, seq_length, kv_lora_rank + qk_rope_head_dim)
         # k_equiv: (batch_size, 1, seq_length, kv_lora_rank + qk_rope_head_dim)
@@ -390,10 +383,10 @@ class DeepseekV3EfficientAttention(nn.Module):
 
         attn_output, attn_weights = attention_interface(
             self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
+            query=q_equiv,
+            key=k_equiv,
+            value=v_equiv,
+            attention_mask=attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
             **kwargs,
@@ -401,8 +394,13 @@ class DeepseekV3EfficientAttention(nn.Module):
 
         if self.config._attn_implementation == "flash_attention_2" and self.qk_head_dim != self.v_head_dim:
             attn_output = attn_output[:, :, :, : self.v_head_dim]
+        # TODO: END of ???
 
-        attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
+        # attn_output: (batch_size, seq_length, num_heads, kv_lora_rank)
+        attn_output = torch.matmul(
+            attn_output,
+            self.v_proj.view(1, 1, self.num_heads, self.kv_lora_rank, self.v_head_dim)
+        ).view(batch_size, seq_length, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
