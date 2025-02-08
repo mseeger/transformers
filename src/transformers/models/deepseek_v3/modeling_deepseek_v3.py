@@ -69,7 +69,13 @@ class DeepseekV3RotaryEmbedding(nn.Module):
         self.config = config
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        # RoPE dimensionality is `config.qk_rope_head_dim`
+        inv_freq, self.attention_scaling = self.rope_init_fn(
+            self.config,
+            device=device,
+            base=config.rope_theta,
+            dim=config.qk_rope_head_dim,
+        )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
@@ -259,16 +265,67 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+def yarn_get_mscale(scale=1, mscale=1):
+    if scale <= 1:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+
+def _attention_compute_scores(
+    query: torch.Tensor,
+    key: torch.Tensor,
+) -> torch.Tensor:
+    nh_q = query.shape[1]
+    nh_k = key.shape[1]
+    # - query: (bs, nh_q, T_q, hs)
+    # - key: (bs, nh_k, T_k, hs)
+    q_per_kv = nh_q // nh_k
+    key_transposed = key.mT  # (bs, nh_k, hs, T_k)
+    if q_per_kv == 1:
+        return query @ key_transposed
+    else:
+        assert q_per_kv > 1
+        if nh_k > 1:
+            q_shape = query.shape[:1] + (nh_k, q_per_kv) + query.shape[2:]
+            _query = query.view(*q_shape)
+            key_transposed = key_transposed.unsqueeze(2)
+        else:
+            _query = query
+        # At this point:
+        # - _query: (bs, nh_k, q_per_kv, T_q, hs)
+        # - key_transposed: (bs, nh_k, 1, hs, T_k)
+        # - scores: (bs, nh_k, q_per_kv, T_q, T_k)
+        scores = torch.matmul(_query, key_transposed)
+        s_shape = query.shape[:-1] + (key.shape[2],)
+        return scores.view(*s_shape)
+
+
+def _attention_compute_weighted_values(
+    scores: torch.Tensor,
+    value: torch.Tensor,
+) -> torch.Tensor:
+    nh_q = scores.shape[1]
+    nh_k = value.shape[1]
+    # - scores: (bs, nh_q, T_q, T_k)
+    # - value: (bs, nh_k, T_k, hs)
+    q_per_kv = nh_q // nh_k
+    if q_per_kv == 1:
+        return scores @ value
+    else:
+        if nh_k > 1:
+            s_shape = scores.shape[:1] + (nh_k, q_per_kv) + scores.shape[2:]
+            _scores = scores.view(*s_shape)
+            _value = value.unsqueeze(2)
+        else:
+            _scores = scores
+            _value = value
+        # At this point:
+        # - _scores: (bs, nh_k, q_per_kv, T_q, T_k)
+        # - _value: (bs, nh_k, 1, T_k, hs)
+        # - result: (bs, nh_k, q_per_kv, T_q, hs)
+        result = torch.matmul(_scores, _value)
+        r_shape = scores.shape[:-1] + (value.shape[-1],)
+        return result.view(*r_shape)
 
 
 def eager_attention_forward(
@@ -280,27 +337,34 @@ def eager_attention_forward(
     scaling: float,
     dropout: float = 0.0,
     **kwargs,
-):
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """
+    `query` has shape `(batch, num_heads, q_len, head_dim)`, while `key`,
+    `value` have shape `(batch, num_key_value_groups, kv_len, head_dim)`. Here,
+    `num_key_value_groups <= num_heads` and
+    `num_heads % num_key_value_groups == 0`.
 
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    """
+    assert query.ndim == key.ndim == value.ndim == 4
+    assert query.shape[0] == key.shape[0] == value.shape[0]  # batch_size
+    num_key_value_groups = key.shape[1]
+    assert value.shape[1] == num_key_value_groups
+    num_heads = query.shape[1]
+    assert num_heads % num_key_value_groups == 0 and num_heads >= num_key_value_groups
+
+    attn_weights = _attention_compute_scores(query, key) * scaling
     if attention_mask is not None:
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        causal_mask = attention_mask[:, :, :, : key.shape[-2]]
         attn_weights = attn_weights + causal_mask
 
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-    attn_output = torch.matmul(attn_weights, value_states)
+    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = F.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = _attention_compute_weighted_values(attn_weights, value)
     attn_output = attn_output.transpose(1, 2).contiguous()
+    # attn_output: (batch, q_len, num_heads, head_dim)
+    # attn_weights: (batch, num_heads, q_len, kv_len)
 
     return attn_output, attn_weights
-
-
-def yarn_get_mscale(scale=1, mscale=1):
-    if scale <= 1:
-        return 1.0
-    return 0.1 * mscale * math.log(scale) + 1.0
 
 
 class DeepseekV3Attention(nn.Module):
@@ -420,12 +484,155 @@ class DeepseekV3Attention(nn.Module):
         return attn_output, attn_weights
 
 
+class DeepseekV3EfficientAttention(nn.Module):
+    """
+    Implements multi-head latent attention in an efficient manner
+
+    """
+    def __init__(self, config: DeepseekV3Config, layer_idx: int):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.attention_dropout = config.attention_dropout
+        self.num_heads = config.num_attention_heads
+        self.rope_theta = config.rope_theta
+        self.q_lora_rank = config.q_lora_rank
+        self.qk_rope_head_dim = config.qk_rope_head_dim
+        self.kv_lora_rank = config.kv_lora_rank
+        self.v_head_dim = config.v_head_dim
+        self.is_causal = True
+
+        # Maps input X to low-rank C_KV, K_R, C_Q
+        self.qkv_encode = nn.Linear(
+            config.hidden_size,
+            config.kv_lora_rank + config.qk_rope_head_dim + config.q_lora_rank,
+            bias=config.attention_bias,
+        )
+        # Maps C_Q to Q-equivalent input to dot products
+        self.q_decode = nn.Linear(
+            config.q_lora_rank,
+            config.num_attention_heads * (config.kv_lora_rank + config.qk_rope_head_dim),
+            bias=False,
+        )
+        # Maps output of dot product attention to U, separate for each head
+        # This never has bias parameters
+        self.proj_v = nn.Parameter(
+            torch.empty(
+                (config.num_attention_heads, config.kv_lora_rank, config.v_head_dim),
+                dtype=nn.Linear.dtype,
+            )
+        )
+        # Output projection
+        self.output_proj = nn.Linear(
+            config.v_head_dim * config.num_attention_heads,
+            config.hidden_size,
+            bias=config.attention_bias,
+        )
+
+        self.q_a_layernorm = DeepseekV3RMSNorm(config.q_lora_rank)
+        self.kv_a_layernorm = DeepseekV3RMSNorm(self.kv_lora_rank)
+
+        self.scaling = config.qk_head_dim ** (-0.5)
+        if self.config.rope_scaling is not None:
+            mscale_all_dim = self.config.rope_scaling.get("mscale_all_dim", 0)
+            scaling_factor = self.config.rope_scaling["factor"]
+            if mscale_all_dim:
+                mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
+                self.scaling = self.scaling * mscale * mscale
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        batch_size, seq_length, _ = hidden_states.shape
+        # Initial map to [C_KV, K_R, C_Q]
+        c_kv, k_r, c_q = self.qkv_encode(hidden_states).split(
+            (self.kv_lora_rank, self.qk_rope_head_dim, self.q_lora_rank), dim=-1
+        )
+        c_kv = self.kv_a_layernorm(c_kv)
+        c_q = self.q_a_layernorm(c_q)
+        # Map to Q equivalent
+        q_nope, q_r = self.q_decode(c_q).split(
+            (self.kv_lora_rank, self.qk_rope_head_dim), dim=-1
+        )
+        # RoPE
+        cos, sin = position_embeddings
+        q_r, k_r = apply_rotary_pos_emb(q_r, k_r, cos, sin)
+        # Reshape and transpose
+        kv_cache_dim = self.kv_lora_rank + self.qk_rope_head_dim
+        k_equiv = torch.cat((c_kv, k_r), dim=-1).view(
+            batch_size, 1, seq_length, kv_cache_dim
+        )
+        q_equiv = torch.cat((q_nope, q_r), dim=-1).view(
+            batch_size, seq_length, self.num_heads, kv_cache_dim
+        ).transpose(1, 2)
+        v_equiv = k_equiv[..., :self.kv_lora_rank]
+        # q_equiv: (batch_size, num_heads, seq_length, kv_lora_rank + qk_rope_head_dim)
+        # k_equiv: (batch_size, 1, seq_length, kv_lora_rank + qk_rope_head_dim)
+        # v_equiv: (batch_size, 1, seq_length, kv_lora_rank), part of `k_equiv`
+
+        # TODO: ???
+        if self.config._attn_implementation == "flash_attention_2" and self.qk_head_dim != self.v_head_dim:
+            value_states = F.pad(value_states, [0, self.qk_head_dim - self.v_head_dim])
+
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        attention_interface: Callable = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+                logger.warning_once(
+                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                )
+            else:
+                attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query=q_equiv,
+            key=k_equiv,
+            value=v_equiv,
+            attention_mask=attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            **kwargs,
+        )
+
+        if self.config._attn_implementation == "flash_attention_2" and self.qk_head_dim != self.v_head_dim:
+            attn_output = attn_output[:, :, :, : self.v_head_dim]
+        # TODO: END of ???
+
+        # attn_output: (batch_size, seq_length, num_heads, kv_lora_rank)
+        attn_output = torch.matmul(
+            attn_output,
+            self.v_proj.view(1, 1, self.num_heads, self.kv_lora_rank, self.v_head_dim)
+        ).view(batch_size, seq_length, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
+
+
 class DeepseekV3DecoderLayer(nn.Module):
     def __init__(self, config: DeepseekV3Config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = DeepseekV3Attention(config=config, layer_idx=layer_idx)
+        if config.use_efficient_attention:
+            self.self_attn = DeepseekV3EfficientAttention(
+                config=config, layer_idx=layer_idx
+            )
+        else:
+            self.self_attn = DeepseekV3Attention(
+                config=config, layer_idx=layer_idx
+            )
 
         if layer_idx >= config.first_k_dense_replace:
             self.mlp = DeepseekV3MoE(config)
@@ -442,10 +649,10 @@ class DeepseekV3DecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
-        output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        output_router_logits: Optional[bool] = False,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
@@ -455,13 +662,11 @@ class DeepseekV3DecoderLayer(nn.Module):
         # Self Attention
         hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
             attention_mask=attention_mask,
-            position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
-            use_cache=use_cache,
             cache_position=cache_position,
-            position_embeddings=position_embeddings,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -621,7 +826,7 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
         config: DeepseekV3Config
     """
 
-    def __init__(self, config):
+    def __init__(self, config: DeepseekV3Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size

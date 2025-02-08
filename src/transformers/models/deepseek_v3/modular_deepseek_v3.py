@@ -33,7 +33,15 @@ class DeepseekV3RMSNorm(LlamaRMSNorm):
 
 
 class DeepseekV3RotaryEmbedding(LlamaRotaryEmbedding):
-    pass
+    def __init__(self, config: DeepseekV3Config, device=None):
+        super().__init__(config, device)
+        # RoPE dimensionality is `config.qk_rope_head_dim`
+        inv_freq, self.attention_scaling = self.rope_init_fn(
+            self.config,
+            device=device,
+            base=config.rope_theta,
+            dim=config.qk_rope_head_dim,
+        )
 
 
 def yarn_get_mscale(scale=1, mscale=1):
@@ -277,7 +285,6 @@ class DeepseekV3EfficientAttention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        # TODO: What is this?
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.attention_dropout = config.attention_dropout
         self.num_heads = config.num_attention_heads
@@ -410,7 +417,14 @@ class DeepseekV3DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = DeepseekV3Attention(config=config, layer_idx=layer_idx)
+        if config.use_efficient_attention:
+            self.self_attn = DeepseekV3EfficientAttention(
+                config=config, layer_idx=layer_idx
+            )
+        else:
+            self.self_attn = DeepseekV3Attention(
+                config=config, layer_idx=layer_idx
+            )
 
         if layer_idx >= config.first_k_dense_replace:
             self.mlp = DeepseekV3MoE(config)
@@ -424,13 +438,13 @@ class DeepseekV3DecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
-        output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        output_router_logits: Optional[bool] = False,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
@@ -440,13 +454,11 @@ class DeepseekV3DecoderLayer(nn.Module):
         # Self Attention
         hidden_states, self_attn_weights = self.self_attn(
             hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
             attention_mask=attention_mask,
-            position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
-            use_cache=use_cache,
             cache_position=cache_position,
-            position_embeddings=position_embeddings,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -477,11 +489,16 @@ class DeepseekV3PreTrainedModel(LlamaPreTrainedModel):
 
 
 class DeepseekV3Model(LlamaModel):
-    def __init__(self, config):
+    def __init__(self, config: DeepseekV3Config):
         super().__init__(config)
         self._register_load_state_dict_pre_hook(self.load_pre_hook)
         self._register_state_dict_hook(self.load_hook)
         self.post_init()
+        self.layers = nn.ModuleList(
+            [DeepseekV3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        )
+        self.norm = DeepseekV3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = DeepseekV3RotaryEmbedding(config=config)
 
     def load_pre_hook(self, state_dict, prefix, *args):
         """
