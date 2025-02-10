@@ -659,14 +659,9 @@ class DeepseekV3DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        if config.use_inference_attention:
-            self.self_attn = DeepseekV3InferenceAttention(
-                config=config, layer_idx=layer_idx
-            )
-        else:
-            self.self_attn = DeepseekV3Attention(
-                config=config, layer_idx=layer_idx
-            )
+        self.self_attn = DeepseekV3Attention(
+            config=config, layer_idx=layer_idx
+        )
 
         if layer_idx >= config.first_k_dense_replace:
             self.mlp = DeepseekV3MoE(config)
