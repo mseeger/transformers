@@ -120,9 +120,12 @@ class DeepseekV3Config(PretrainedConfig):
             Whether to use a bias in the query, key, value and output projection layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the attention probabilities.
-        use_efficient_attention (`bool`, *optional*, defaults to `False`):
-            Use efficient MLA implementation, where encoder snd decoder weights
-            are combined.
+        use_inference_attention (`bool`, *optional*, defaults to `False`):
+            Use MLA implementation :class:`DeepseekV3InferenceAttention` optimized
+            for inference. Stronfly recommended if the model is used for
+            inference. If `use_inference_attention=False`, the key-value cache
+            does not make use of the low-rank structure. This is the whole purpose
+            of MLA.
 
     ```python
     >>> from transformers import DeepseekV3Model, DeepseekV3Config
@@ -184,7 +187,7 @@ class DeepseekV3Config(PretrainedConfig):
         rope_scaling=None,
         attention_bias=False,
         attention_dropout=0.0,
-        use_efficient_attention=False,
+        use_inference_attention=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -225,7 +228,7 @@ class DeepseekV3Config(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
-        self.use_efficient_attention = use_efficient_attention
+        self.use_inference_attention = use_inference_attention
         # Validate the correctness of rotary position embeddings parameters
         # BC: if there is a 'type' field, copy it it to 'rope_type'.
         if self.rope_scaling is not None and "type" in self.rope_scaling:

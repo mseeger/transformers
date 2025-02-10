@@ -70,11 +70,14 @@ class DeepseekV3RotaryEmbedding(nn.Module):
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
         # RoPE dimensionality is `config.qk_rope_head_dim`
+        self._rope_kwargs = dict(
+            base=config.rope_theta,
+            dim=config.qk_rope_head_dim,
+        )
         inv_freq, self.attention_scaling = self.rope_init_fn(
             self.config,
             device=device,
-            base=config.rope_theta,
-            dim=config.qk_rope_head_dim,
+            **self._rope_kwargs,
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
@@ -87,7 +90,12 @@ class DeepseekV3RotaryEmbedding(nn.Module):
         """
         seq_len = torch.max(position_ids) + 1
         if seq_len > self.max_seq_len_cached:  # growth
-            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, seq_len=seq_len)
+            inv_freq, self.attention_scaling = self.rope_init_fn(
+                self.config,
+                device=device,
+                seq_len=seq_len,
+                **self._rope_kwargs,
+            )
             self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
             self.max_seq_len_cached = seq_len
 
@@ -368,7 +376,14 @@ def eager_attention_forward(
 
 
 class DeepseekV3Attention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """
+    Multi-head latent attention optimized for training. For inference, we
+    strongly recommend to use :class:`DeepseekV3InferenceAttention`, via
+    `config.use_inference_attention=True`. The key-value cache does not
+    make use of the low-rank structure of attention parameters here. This is
+    the whole point of using it.
+
+    """
 
     def __init__(self, config: DeepseekV3Config, layer_idx: int):
         super().__init__()
@@ -424,7 +439,7 @@ class DeepseekV3Attention(nn.Module):
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         batch_size, seq_length = hidden_states.shape[:-1]
         query_shape = (batch_size, seq_length, -1, self.qk_head_dim)
         key_shape = (batch_size, seq_length, -1, self.qk_nope_head_dim + self.v_head_dim)
@@ -451,6 +466,11 @@ class DeepseekV3Attention(nn.Module):
             value_states = F.pad(value_states, [0, self.qk_head_dim - self.v_head_dim])
 
         if past_key_value is not None:
+            logger.warning_once(
+                "Consider using config.use_inference_attention=True for inference. "
+                f"Otherwise, the key-value cache is {2 * self.num_heads} times "
+                "larger than necessary."
+            )
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
@@ -484,9 +504,13 @@ class DeepseekV3Attention(nn.Module):
         return attn_output, attn_weights
 
 
-class DeepseekV3EfficientAttention(nn.Module):
+class DeepseekV3InferenceAttention(nn.Module):
     """
-    Implements multi-head latent attention in an efficient manner
+    Multi-head latent attention optimized for inference.
+
+    The key-value cache only needs to maintain a key tensor of shape
+    `(batch_size, 1, seq_length, kv_lora_rank + qk_rope_head_dim)`. The value
+    tensor is a slice of this.
 
     """
     def __init__(self, config: DeepseekV3Config, layer_idx: int):
@@ -503,34 +527,43 @@ class DeepseekV3EfficientAttention(nn.Module):
         self.v_head_dim = config.v_head_dim
         self.is_causal = True
 
-        # Maps input X to low-rank C_KV, K_R, C_Q
-        self.qkv_encode = nn.Linear(
+        # Maps input X to low-rank C_KV, K_R
+        # Corresponds to `kv_a_proj_with_mqa` in :class:`DeepseekV3Attention`
+        self.kv_encode = nn.Linear(
             config.hidden_size,
-            config.kv_lora_rank + config.qk_rope_head_dim + config.q_lora_rank,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            bias=config.attention_bias,
+        )
+        # Maps input X to low-rank C_Q
+        # Corresponds to `q_a_proj` in :class:`DeepseekV3Attention`
+        self.q_encode = nn.Linear(
+            config.hidden_size,
+            self.q_lora_rank,
             bias=config.attention_bias,
         )
         # Maps C_Q to Q-equivalent input to dot products
         self.q_decode = nn.Linear(
-            config.q_lora_rank,
-            config.num_attention_heads * (config.kv_lora_rank + config.qk_rope_head_dim),
+            self.q_lora_rank,
+            self.num_heads * (self.kv_lora_rank + self.qk_rope_head_dim),
             bias=False,
         )
         # Maps output of dot product attention to U, separate for each head
         # This never has bias parameters
         self.proj_v = nn.Parameter(
             torch.empty(
-                (config.num_attention_heads, config.kv_lora_rank, config.v_head_dim),
+                (self.num_heads, self.kv_lora_rank, self.v_head_dim),
                 dtype=nn.Linear.dtype,
             )
         )
         # Output projection
+        # Corresponds to `o_proj` in :class:`DeepseekV3Attention`
         self.output_proj = nn.Linear(
-            config.v_head_dim * config.num_attention_heads,
+            self.v_head_dim * self.num_heads,
             config.hidden_size,
             bias=config.attention_bias,
         )
 
-        self.q_a_layernorm = DeepseekV3RMSNorm(config.q_lora_rank)
+        self.q_a_layernorm = DeepseekV3RMSNorm(self.q_lora_rank)
         self.kv_a_layernorm = DeepseekV3RMSNorm(self.kv_lora_rank)
 
         self.scaling = config.qk_head_dim ** (-0.5)
@@ -549,15 +582,15 @@ class DeepseekV3EfficientAttention(nn.Module):
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         batch_size, seq_length, _ = hidden_states.shape
-        # Initial map to [C_KV, K_R, C_Q]
-        c_kv, k_r, c_q = self.qkv_encode(hidden_states).split(
-            (self.kv_lora_rank, self.qk_rope_head_dim, self.q_lora_rank), dim=-1
+        # Encoding: Input X to [C_KV, K_R, C_Q]
+        c_kv, k_r = self.kv_encode(hidden_states).split(
+            (self.kv_lora_rank, self.qk_rope_head_dim), dim=-1
         )
         c_kv = self.kv_a_layernorm(c_kv)
-        c_q = self.q_a_layernorm(c_q)
-        # Map to Q equivalent
+        c_q = self.q_a_layernorm(self.q_encode(hidden_states))
+        # Decoding to Q equivalent
         q_nope, q_r = self.q_decode(c_q).split(
             (self.kv_lora_rank, self.qk_rope_head_dim), dim=-1
         )
@@ -572,19 +605,24 @@ class DeepseekV3EfficientAttention(nn.Module):
         q_equiv = torch.cat((q_nope, q_r), dim=-1).view(
             batch_size, seq_length, self.num_heads, kv_cache_dim
         ).transpose(1, 2)
-        v_equiv = k_equiv[..., :self.kv_lora_rank]
         # q_equiv: (batch_size, num_heads, seq_length, kv_lora_rank + qk_rope_head_dim)
         # k_equiv: (batch_size, 1, seq_length, kv_lora_rank + qk_rope_head_dim)
-        # v_equiv: (batch_size, 1, seq_length, kv_lora_rank), part of `k_equiv`
-
-        # TODO: ???
-        if self.config._attn_implementation == "flash_attention_2" and self.qk_head_dim != self.v_head_dim:
-            value_states = F.pad(value_states, [0, self.qk_head_dim - self.v_head_dim])
 
         if past_key_value is not None:
+            # The KV cache has to maintain a single tensor only. We provide a bogus
+            # tensor for value.
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            bogus_value_states = k_equiv[0, 0, :, 0].view(1, 1, -1, 1)
+            k_equiv, _ = past_key_value.update(
+                key_states=k_equiv,
+                value_states=bogus_value_states,
+                layer_idx=self.layer_idx,
+                cache_kwargs=cache_kwargs,
+            )
+        v_equiv = k_equiv[..., :self.kv_lora_rank]
+        # k_equiv: (batch_size, 1, cache_length, kv_lora_rank + qk_rope_head_dim)
+        # v_equiv: (batch_size, 1, cache_length, kv_lora_rank), part of `k_equiv`
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
@@ -607,16 +645,12 @@ class DeepseekV3EfficientAttention(nn.Module):
             **kwargs,
         )
 
-        if self.config._attn_implementation == "flash_attention_2" and self.qk_head_dim != self.v_head_dim:
-            attn_output = attn_output[:, :, :, : self.v_head_dim]
-        # TODO: END of ???
-
         # attn_output: (batch_size, seq_length, num_heads, kv_lora_rank)
         attn_output = torch.matmul(
             attn_output,
             self.v_proj.view(1, 1, self.num_heads, self.kv_lora_rank, self.v_head_dim)
-        ).view(batch_size, seq_length, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
+        ).view(batch_size, seq_length, self.num_heads * self.v_head_dim)
+        attn_output = self.output_proj(attn_output)
         return attn_output, attn_weights
 
 
@@ -625,8 +659,8 @@ class DeepseekV3DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        if config.use_efficient_attention:
-            self.self_attn = DeepseekV3EfficientAttention(
+        if config.use_inference_attention:
+            self.self_attn = DeepseekV3InferenceAttention(
                 config=config, layer_idx=layer_idx
             )
         else:
