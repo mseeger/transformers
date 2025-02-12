@@ -6,10 +6,8 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 
-from ..time_series_transformer.modeling_time_series_transformer import weighted_average
 from ...activations import ACT2FN
 from ...cache_utils import Cache
-from ...commands.add_new_model_like import insert_tokenizer_in_auto_module
 from ...modeling_flash_attention_utils import FlashAttentionKwargs
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS
 from ...processing_utils import Unpack
@@ -39,11 +37,31 @@ class DeepseekV3RotaryEmbedding(LlamaRotaryEmbedding):
         super().__init__(config, device)
         # RoPE dimensionality is `config.qk_rope_head_dim`
         inv_freq, self.attention_scaling = self.rope_init_fn(
-            self.config,
             device=device,
             base=config.rope_theta,
             dim=config.qk_rope_head_dim,
         )
+
+    def _dynamic_frequency_update(self, position_ids, device):
+        """
+        dynamic RoPE layers should recompute `inv_freq` in the following situations:
+        1 - growing beyond the cached sequence length (allow scaling)
+        2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
+        """
+        seq_len = torch.max(position_ids) + 1
+        if seq_len > self.max_seq_len_cached:  # growth
+            inv_freq, self.attention_scaling = self.rope_init_fn(
+                device=device, seq_len=seq_len, **self._rope_kwargs,
+            )
+            self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
+            self.max_seq_len_cached = seq_len
+
+        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
+            # This .to() is needed if the model has been moved to a device after being initialized (because
+            # the buffer is automatically moved, but not the original copy)
+            self.original_inv_freq = self.original_inv_freq.to(device)
+            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
+            self.max_seq_len_cached = self.original_max_seq_len
 
 
 def yarn_get_mscale(scale=1, mscale=1):
@@ -167,11 +185,11 @@ def _remove_inference_params(module: nn.Module):
     module.inference_q_decode = None
 
 
-def full_backward_hook(module: nn.Module, grad_input, grad_output):
+def _full_backward_hook(module: nn.Module, grad_input, grad_output):
     _remove_inference_params(module)
 
 
-def load_state_dict_post_hook(module: nn.Module, incompatible_keys):
+def _load_state_dict_post_hook(module: nn.Module, incompatible_keys):
     _remove_inference_params(module)
 
 
@@ -213,7 +231,9 @@ class AttentionParametersFingerprint:
             return False
         if q_b_proj.device != self.device or kv_b_proj.device != self.device:
             return False
-        args_fingerprint = self._extract_fingerprint(q_b_proj, kv_b_proj)
+        args_fingerprint = self._extract_fingerprint(
+            q_b_proj.flatten(), kv_b_proj.flatten()
+        )
         return self.fingerprint.eq(args_fingerprint).all().item()
 
     def _extract_fingerprint(
@@ -254,7 +274,11 @@ class DeepseekV3Attention(nn.Module):
     go unnoticed.
 
     To be safe, call :meth:`reset_inference_params` before running inference,
-    this forces recomputation of the inference parameters.
+    this forces the inference parameters to be recomputed.
+
+    If `config.attention_no_inference_mode == True`, the training variant will
+    always be used. This is recommended only if inference is used sporadically
+    (e.g., to compute validation scores during training).
 
     """
     def __init__(self, config: DeepseekV3Config, layer_idx: int):
@@ -287,7 +311,7 @@ class DeepseekV3Attention(nn.Module):
         )
         # Maps low-rank C_Q to Q (with RoPE part)
         self.q_b_proj = nn.Linear(
-            config.q_lora_rank,
+            self.q_lora_rank,
             self.num_heads * self.qk_head_dim,
             bias=False,
         )
@@ -304,7 +328,7 @@ class DeepseekV3Attention(nn.Module):
             bias=config.attention_bias,
         )
 
-        self.q_a_layernorm = DeepseekV3RMSNorm(config.q_lora_rank)
+        self.q_a_layernorm = DeepseekV3RMSNorm(self.q_lora_rank)
         self.kv_a_layernorm = DeepseekV3RMSNorm(self.kv_lora_rank)
 
         # Parameters needed in inference variant, derived from those of the
@@ -316,8 +340,8 @@ class DeepseekV3Attention(nn.Module):
         # These hooks are called whenever a backward pass or `load_state_dict`
         # are called, which potentially changes model parameters. They reset
         # `inference_q_decode`, `inference_v_proj`
-        self.register_full_backward_hook(full_backward_hook)
-        self.register_load_state_dict_post_hook(load_state_dict_post_hook)
+        self.register_full_backward_hook(_full_backward_hook)
+        self.register_load_state_dict_post_hook(_load_state_dict_post_hook)
         # Fingerprint, used to test whether model parameters behind the
         # `inference_*` have changed. May miss certain changes
         self._inference_params_fingerprint: Optional[AttentionParametersFingerprint] = None
@@ -339,13 +363,13 @@ class DeepseekV3Attention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if self.training:
-            if past_key_value is not None or cache_position is not None:
-                logger.warning_once("Key-value cache not served during training: past_key_value, cache_position are ignored")
+        if self.training or self.config.attention_no_inference_mode:
             return self._forward_training(
                 hidden_states=hidden_states,
                 position_embeddings=position_embeddings,
                 attention_mask=attention_mask,
+                past_key_value=past_key_value,
+                cache_position=cache_position,
                 **kwargs
             )
         else:
@@ -363,6 +387,8 @@ class DeepseekV3Attention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
+        past_key_value: Optional[Cache],
+        cache_position: Optional[torch.LongTensor],
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         batch_size, seq_length, _ = hidden_states.shape
@@ -409,6 +435,13 @@ class DeepseekV3Attention(nn.Module):
 
         if self.config._attn_implementation == "flash_attention_2" and self.qk_head_dim != self.v_head_dim:
             value_states = F.pad(value_states, [0, self.qk_head_dim - self.v_head_dim])
+
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
@@ -542,7 +575,7 @@ class DeepseekV3Attention(nn.Module):
         )
         self.inference_v_proj = kv_b_2.view(
             self.num_heads, self.v_head_dim, self.kv_lora_rank
-        ).transpose(1, 2)
+        ).transpose(1, 2).contiguous()
         # inference_q_decode from q_b_1, kv_b_1, and q_b_2
         q_b_1 = q_b_1.view(self.num_heads, self.qk_nope_head_dim, self.q_lora_rank)
         kv_b_1 = kv_b_1.view(self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank)
@@ -556,7 +589,7 @@ class DeepseekV3Attention(nn.Module):
         )
         self.inference_q_decode = torch.cat(
             (q_decode_1, q_b_2), dim=0
-        ).transpose(0, 1)
+        ).transpose(0, 1).contiguous()
 
     def _need_to_update_inference_params(self) -> bool:
         if self.inference_v_proj is None or self.inference_q_decode is None:
@@ -580,10 +613,11 @@ class DeepseekV3Attention(nn.Module):
         recomputed.
 
         """
-        self._convert_params_training_to_inference()
-        self._inference_params_fingerprint = AttentionParametersFingerprint(
-            self.q_b_proj.weight, self.kv_b_proj.weight,
-        )
+        if not self.config.attention_no_inference_mode:
+            self._convert_params_training_to_inference()
+            self._inference_params_fingerprint = AttentionParametersFingerprint(
+                self.q_b_proj.weight, self.kv_b_proj.weight,
+            )
 
 
 class DeepseekV3DecoderLayer(nn.Module):

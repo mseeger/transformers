@@ -75,9 +75,7 @@ class DeepseekV3RotaryEmbedding(nn.Module):
             dim=config.qk_rope_head_dim,
         )
         inv_freq, self.attention_scaling = self.rope_init_fn(
-            self.config,
-            device=device,
-            **self._rope_kwargs,
+            device=device, **self._rope_kwargs,
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
@@ -91,10 +89,7 @@ class DeepseekV3RotaryEmbedding(nn.Module):
         seq_len = torch.max(position_ids) + 1
         if seq_len > self.max_seq_len_cached:  # growth
             inv_freq, self.attention_scaling = self.rope_init_fn(
-                self.config,
-                device=device,
-                seq_len=seq_len,
-                **self._rope_kwargs,
+                device=device, seq_len=seq_len, **self._rope_kwargs,
             )
             self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
             self.max_seq_len_cached = seq_len
@@ -375,16 +370,108 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
+def _remove_inference_params(module: nn.Module):
+    assert isinstance(module, DeepseekV3Attention)  # Sanity check
+    module.inference_v_proj = None
+    module.inference_q_decode = None
+
+
+def _full_backward_hook(module: nn.Module, grad_input, grad_output):
+    _remove_inference_params(module)
+
+
+def _load_state_dict_post_hook(module: nn.Module, incompatible_keys):
+    _remove_inference_params(module)
+
+
+class AttentionParametersFingerprint:
+    def __init__(
+        self,
+        q_b_proj: torch.Tensor,
+        kv_b_proj: torch.Tensor,
+        fingerprint_size: int = 256,
+    ):
+        self.q_b_shape = q_b_proj.shape
+        self.kv_b_shape = kv_b_proj.shape
+        q_b_proj = q_b_proj.flatten()
+        kv_b_proj = kv_b_proj.flatten()
+        q_b_sz = q_b_proj.shape[0]
+        kv_b_sz = kv_b_proj.shape[0]
+        assert fingerprint_size >= 2
+        fp_q_sz = min(fingerprint_size // 2, q_b_sz)
+        fp_kv_sz = min(fingerprint_size - fp_q_sz, kv_b_sz)
+        self.device = q_b_proj.device
+        self.fp_q_pos = torch.randint(
+            low=0,
+            high=q_b_sz,
+            size=(fp_q_sz,),
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.fp_kv_pos = torch.randint(
+            low=0,
+            high=kv_b_sz,
+            size=(fp_kv_sz,),
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.fingerprint = self._extract_fingerprint(q_b_proj, kv_b_proj).clone()
+
+    def match(self, q_b_proj: torch.Tensor, kv_b_proj: torch.Tensor) -> bool:
+        if q_b_proj.shape != self.q_b_shape or kv_b_proj.shape != self.kv_b_shape:
+            return False
+        if q_b_proj.device != self.device or kv_b_proj.device != self.device:
+            return False
+        args_fingerprint = self._extract_fingerprint(
+            q_b_proj.flatten(), kv_b_proj.flatten()
+        )
+        return self.fingerprint.eq(args_fingerprint).all().item()
+
+    def _extract_fingerprint(
+        self, q_b_proj: torch.Tensor, kv_b_proj: torch.Tensor
+    ) -> torch.Tensor:
+        assert q_b_proj.ndim == kv_b_proj.ndim == 1
+        assert q_b_proj.device == kv_b_proj.device == self.device
+        return torch.cat((q_b_proj[self.fp_q_pos], kv_b_proj[self.fp_kv_pos]))
+
+
 class DeepseekV3Attention(nn.Module):
     """
-    Multi-head latent attention optimized for training. For inference, we
-    strongly recommend to use :class:`DeepseekV3InferenceAttention`, via
-    `config.use_inference_attention=True`. The key-value cache does not
-    make use of the low-rank structure of attention parameters here. This is
-    the whole point of using it.
+    Multi-head latent attention.
+
+    We implement two different versions, referred to as "training" and
+    "inference", which are used depending on `self.training`.
+
+    The training variant is closely related to open source code released by the
+    Deepseek authors. It does not combine Q and K decoding linear maps and does
+    not exploit the low rank structure for efficient key-value caching. However,
+    it is faster for training, and its linear maps are compatible with the
+    weights released by Deepseek.
+
+    The inference variant combines Q and K decoding linear maps. This allows to
+    shrink the key-value cache to a single buffer without a heads dimension. It
+    also needs less memory and is faster during inference. Without this variant,
+    the advantage of multi-head latent attention over default multi-head
+    self-attention is lost.
+
+    Note that the inference variant needs parameter tensors derived from the
+    linear blocks of the training variant. Some are the same or views, but
+    in particular `inference_q_decode` needs to be computed. This needs some
+    extra memory. The computations are done when inference needs them and the
+    underlying parameters have changed. Changes are tracked by using a backward
+    and `load_state_dict` hook, and also by way of a fingerprint. This is not
+    perfect. If parameters are changed not through a backward pass or
+    `load_state_dict` and the change does not affect the fingerprint, it may
+    go unnoticed.
+
+    To be safe, call :meth:`reset_inference_params` before running inference,
+    this forces the inference parameters to be recomputed.
+
+    If `config.attention_no_inference_mode == True`, the training variant will
+    always be used. This is recommended only if inference is used sporadically
+    (e.g., to compute validation scores during training).
 
     """
-
     def __init__(self, config: DeepseekV3Config, layer_idx: int):
         super().__init__()
         self.config = config
@@ -401,27 +488,54 @@ class DeepseekV3Attention(nn.Module):
         self.qk_head_dim = config.qk_head_dim
 
         self.is_causal = True
-        self.q_a_proj = nn.Linear(config.hidden_size, config.q_lora_rank, bias=config.attention_bias)
-        self.q_a_layernorm = DeepseekV3RMSNorm(config.q_lora_rank)
-        self.q_b_proj = nn.Linear(config.q_lora_rank, self.num_heads * self.qk_head_dim, bias=False)
-
+        # Maps input X to low-rank C_KV, K_R
         self.kv_a_proj_with_mqa = nn.Linear(
             config.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
             bias=config.attention_bias,
         )
-        self.kv_a_layernorm = DeepseekV3RMSNorm(self.kv_lora_rank)
+        # Maps input X to low-rank C_Q
+        self.q_a_proj = nn.Linear(
+            config.hidden_size,
+            self.q_lora_rank,
+            bias=config.attention_bias,
+        )
+        # Maps low-rank C_Q to Q (with RoPE part)
+        self.q_b_proj = nn.Linear(
+            self.q_lora_rank,
+            self.num_heads * self.qk_head_dim,
+            bias=False,
+        )
+        # Maps low-rank C_KV to K (without RoPE part) and V
         self.kv_b_proj = nn.Linear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
         )
-
+        # Output projection
         self.o_proj = nn.Linear(
             self.num_heads * self.v_head_dim,
             config.hidden_size,
             bias=config.attention_bias,
         )
+
+        self.q_a_layernorm = DeepseekV3RMSNorm(self.q_lora_rank)
+        self.kv_a_layernorm = DeepseekV3RMSNorm(self.kv_lora_rank)
+
+        # Parameters needed in inference variant, derived from those of the
+        # training variant
+        # inference_q_decode: (q_lora_rank, num_heads * (kv_lora_rank + qk_rope_head_dim))
+        # inference_v_proj: (num_heads, kv_lora_rank, v_head_dim)
+        self.inference_q_decode: Optional[torch.Tensor] = None
+        self.inference_v_proj: Optional[torch.Tensor] = None
+        # These hooks are called whenever a backward pass or `load_state_dict`
+        # are called, which potentially changes model parameters. They reset
+        # `inference_q_decode`, `inference_v_proj`
+        self.register_full_backward_hook(_full_backward_hook)
+        self.register_load_state_dict_post_hook(_load_state_dict_post_hook)
+        # Fingerprint, used to test whether model parameters behind the
+        # `inference_*` have changed. May miss certain changes
+        self._inference_params_fingerprint: Optional[AttentionParametersFingerprint] = None
 
         self.scaling = self.qk_head_dim ** (-0.5)
         if self.config.rope_scaling is not None:
@@ -440,24 +554,72 @@ class DeepseekV3Attention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        batch_size, seq_length = hidden_states.shape[:-1]
-        query_shape = (batch_size, seq_length, -1, self.qk_head_dim)
-        key_shape = (batch_size, seq_length, -1, self.qk_nope_head_dim + self.v_head_dim)
+        if self.training or self.config.attention_no_inference_mode:
+            return self._forward_training(
+                hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
+                attention_mask=attention_mask,
+                past_key_value=past_key_value,
+                cache_position=cache_position,
+                **kwargs
+            )
+        else:
+            return self._forward_inference(
+                hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
+                attention_mask=attention_mask,
+                past_key_value=past_key_value,
+                cache_position=cache_position,
+                **kwargs
+            )
 
-        q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states))).view(query_shape).transpose(1, 2)
-        q_pass, q_rot = torch.split(q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+    def _forward_training(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_value: Optional[Cache],
+        cache_position: Optional[torch.LongTensor],
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        batch_size, seq_length, _ = hidden_states.shape
+
+        q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(
+            hidden_states
+        ))).view(
+            batch_size, seq_length, self.num_heads, self.qk_head_dim
+        ).transpose(1, 2)
+        q_pass, q_rot = torch.split(
+            q_states,
+            [self.qk_nope_head_dim, self.qk_rope_head_dim],
+            dim=-1
+        )
+        # q_pass: (batch_size, num_heads, seq_length, qk_nope_head_dim)
+        # q_rot: (batch_size, num_heads, seq_length, qk_rope_head_dim)
 
         compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
-        k_pass, k_rot = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-
-        k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(key_shape).transpose(1, 2)
-        k_pass, value_states = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
+        k_pass, k_rot = torch.split(
+            compressed_kv,
+            [self.kv_lora_rank, self.qk_rope_head_dim],
+            dim=-1
+        )
+        k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(
+            batch_size, seq_length, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        ).transpose(1, 2)
+        k_pass, value_states = torch.split(
+            k_pass,
+            [self.qk_nope_head_dim, self.v_head_dim],
+            dim=-1
+        )
         k_rot = k_rot.view(batch_size, 1, seq_length, self.qk_rope_head_dim)
+        # k_pass: (batch_size, num_heads, seq_length, qk_nope_head_dim)
+        # k_rot: (batch_size, 1, seq_length, qk_rope_head_dim)
+        # value_states: (batch_size, num_heads, seq_length, v_head_dim)
 
         cos, sin = position_embeddings
         q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, cos, sin)
         k_rot = k_rot.expand(*k_pass.shape[:-1], -1)
+        # k_rot: (batch_size, num_heads, seq_length, qk_rope_head_dim)
 
         query_states = torch.cat((q_pass, q_rot), dim=-1)
         key_states = torch.cat((k_pass, k_rot), dim=-1)
@@ -466,14 +628,11 @@ class DeepseekV3Attention(nn.Module):
             value_states = F.pad(value_states, [0, self.qk_head_dim - self.v_head_dim])
 
         if past_key_value is not None:
-            logger.warning_once(
-                "Consider using config.use_inference_attention=True for inference. "
-                f"Otherwise, the key-value cache is {2 * self.num_heads} times "
-                "larger than necessary."
-            )
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
@@ -499,110 +658,50 @@ class DeepseekV3Attention(nn.Module):
         if self.config._attn_implementation == "flash_attention_2" and self.qk_head_dim != self.v_head_dim:
             attn_output = attn_output[:, :, :, : self.v_head_dim]
 
-        attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
+        attn_output = attn_output.reshape(
+            batch_size, seq_length, self.num_heads * self.v_head_dim
+        ).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
-
-class DeepseekV3InferenceAttention(nn.Module):
-    """
-    Multi-head latent attention optimized for inference.
-
-    The key-value cache only needs to maintain a key tensor of shape
-    `(batch_size, 1, seq_length, kv_lora_rank + qk_rope_head_dim)`. The value
-    tensor is a slice of this.
-
-    """
-    def __init__(self, config: DeepseekV3Config, layer_idx: int):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-        self.attention_dropout = config.attention_dropout
-        self.num_heads = config.num_attention_heads
-        self.rope_theta = config.rope_theta
-        self.q_lora_rank = config.q_lora_rank
-        self.qk_rope_head_dim = config.qk_rope_head_dim
-        self.kv_lora_rank = config.kv_lora_rank
-        self.v_head_dim = config.v_head_dim
-        self.is_causal = True
-
-        # Maps input X to low-rank C_KV, K_R
-        # Corresponds to `kv_a_proj_with_mqa` in :class:`DeepseekV3Attention`
-        self.kv_encode = nn.Linear(
-            config.hidden_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=config.attention_bias,
-        )
-        # Maps input X to low-rank C_Q
-        # Corresponds to `q_a_proj` in :class:`DeepseekV3Attention`
-        self.q_encode = nn.Linear(
-            config.hidden_size,
-            self.q_lora_rank,
-            bias=config.attention_bias,
-        )
-        # Maps C_Q to Q-equivalent input to dot products
-        self.q_decode = nn.Linear(
-            self.q_lora_rank,
-            self.num_heads * (self.kv_lora_rank + self.qk_rope_head_dim),
-            bias=False,
-        )
-        # Maps output of dot product attention to U, separate for each head
-        # This never has bias parameters
-        self.proj_v = nn.Parameter(
-            torch.empty(
-                (self.num_heads, self.kv_lora_rank, self.v_head_dim),
-                dtype=nn.Linear.dtype,
-            )
-        )
-        # Output projection
-        # Corresponds to `o_proj` in :class:`DeepseekV3Attention`
-        self.output_proj = nn.Linear(
-            self.v_head_dim * self.num_heads,
-            config.hidden_size,
-            bias=config.attention_bias,
-        )
-
-        self.q_a_layernorm = DeepseekV3RMSNorm(self.q_lora_rank)
-        self.kv_a_layernorm = DeepseekV3RMSNorm(self.kv_lora_rank)
-
-        self.scaling = config.qk_head_dim ** (-0.5)
-        if self.config.rope_scaling is not None:
-            mscale_all_dim = self.config.rope_scaling.get("mscale_all_dim", 0)
-            scaling_factor = self.config.rope_scaling["factor"]
-            if mscale_all_dim:
-                mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
-                self.scaling = self.scaling * mscale * mscale
-
-    def forward(
+    def _forward_inference(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
-        past_key_value: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache],
+        cache_position: Optional[torch.LongTensor],
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         batch_size, seq_length, _ = hidden_states.shape
-        # Encoding: Input X to [C_KV, K_R, C_Q]
-        c_kv, k_r = self.kv_encode(hidden_states).split(
+        # Ensure that `inference_q_decode`, `inference_v_proj` are up-2-date
+        self._update_inference_params()
+
+        # Encoding: Input X to [C_KV, K_R]
+        c_kv, k_rot = self.kv_a_proj_with_mqa(hidden_states).split(
             (self.kv_lora_rank, self.qk_rope_head_dim), dim=-1
         )
         c_kv = self.kv_a_layernorm(c_kv)
-        c_q = self.q_a_layernorm(self.q_encode(hidden_states))
+        c_q = self.q_a_layernorm(self.q_a_proj(hidden_states))
         # Decoding to Q equivalent
-        q_nope, q_r = self.q_decode(c_q).split(
-            (self.kv_lora_rank, self.qk_rope_head_dim), dim=-1
+        q_nope, q_rot = torch.matmul(
+            c_q,
+            self.inference_q_decode.unsqueeze(0)
+        ).split(
+            (self.num_heads * self.kv_lora_rank, self.num_heads * self.qk_rope_head_dim),
+            dim=-1
         )
+        # q_nope: (batch_size, seq_length, num_heads * kv_lora_rank)
+        # q_rot: (batch_size, seq_length, num_heads * qk_rope_head_dim)
         # RoPE
         cos, sin = position_embeddings
-        q_r, k_r = apply_rotary_pos_emb(q_r, k_r, cos, sin)
+        q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, cos, sin)
         # Reshape and transpose
         kv_cache_dim = self.kv_lora_rank + self.qk_rope_head_dim
-        k_equiv = torch.cat((c_kv, k_r), dim=-1).view(
+        k_equiv = torch.cat((c_kv, k_rot), dim=-1).view(
             batch_size, 1, seq_length, kv_cache_dim
         )
-        q_equiv = torch.cat((q_nope, q_r), dim=-1).view(
+        q_equiv = torch.cat((q_nope, q_rot), dim=-1).view(
             batch_size, seq_length, self.num_heads, kv_cache_dim
         ).transpose(1, 2)
         # q_equiv: (batch_size, num_heads, seq_length, kv_lora_rank + qk_rope_head_dim)
@@ -646,12 +745,70 @@ class DeepseekV3InferenceAttention(nn.Module):
         )
 
         # attn_output: (batch_size, seq_length, num_heads, kv_lora_rank)
+        # inference_v_proj: (num_heads, kv_lora_rank, v_head_dim)
         attn_output = torch.matmul(
-            attn_output,
-            self.v_proj.view(1, 1, self.num_heads, self.kv_lora_rank, self.v_head_dim)
-        ).view(batch_size, seq_length, self.num_heads * self.v_head_dim)
-        attn_output = self.output_proj(attn_output)
+            self.inference_v_proj.unsqueeze(0),
+            attn_output.transpose(1, 2)
+        ).transpose(1, 2).view(
+            batch_size, seq_length, self.num_heads * self.v_head_dim
+        )
+        attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
+
+    def _convert_params_training_to_inference(self):
+        q_b_1, q_b_2 = self.q_b_proj.weight.split(
+            (self.num_heads * self.qk_nope_head_dim, self.num_heads * self.qk_rope_head_dim),
+            dim=0
+        )
+        kv_b_1, kv_b_2 = self.kv_b_proj.weight.split(
+            (self.num_heads * self.qk_nope_head_dim, self.num_heads * self.v_head_dim),
+            dim=0
+        )
+        self.inference_v_proj = kv_b_2.view(
+            self.num_heads, self.v_head_dim, self.kv_lora_rank
+        ).transpose(1, 2).contiguous()
+        # inference_q_decode from q_b_1, kv_b_1, and q_b_2
+        q_b_1 = q_b_1.view(self.num_heads, self.qk_nope_head_dim, self.q_lora_rank)
+        kv_b_1 = kv_b_1.view(self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank)
+        # matmul in float32, to decrease numerical errors
+        dtype = q_b_1.dtype
+        q_decode_1 = torch.matmul(
+            kv_b_1.transpose(1, 2).to(dtype=torch.float32),
+            q_b_1.to(dtype=torch.float32),
+        ).to(dtype=dtype).view(
+            self.num_heads * self.kv_lora_rank, self.q_lora_rank
+        )
+        self.inference_q_decode = torch.cat(
+            (q_decode_1, q_b_2), dim=0
+        ).transpose(0, 1).contiguous()
+
+    def _need_to_update_inference_params(self) -> bool:
+        if self.inference_v_proj is None or self.inference_q_decode is None:
+            return True
+        if self._inference_params_fingerprint is None:
+            return True
+        return not self._inference_params_fingerprint.match(
+            self.q_b_proj.weight, self.kv_b_proj.weight
+        )
+
+    def _update_inference_params(self):
+        if self._need_to_update_inference_params():
+            self.reset_inference_params()
+
+    def reset_inference_params(self):
+        """
+        As detailed in the header comment, :meth:`forward` in inference mode
+        requires some derived parameters, which are typically recomputed
+        whenever primary model parameters change. Ths test for changes us not
+        perfect. Calling this method forces the inference parameters to be
+        recomputed.
+
+        """
+        if not self.config.attention_no_inference_mode:
+            self._convert_params_training_to_inference()
+            self._inference_params_fingerprint = AttentionParametersFingerprint(
+                self.q_b_proj.weight, self.kv_b_proj.weight,
+            )
 
 
 class DeepseekV3DecoderLayer(nn.Module):
