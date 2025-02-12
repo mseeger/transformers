@@ -474,13 +474,13 @@ class DeepseekV3Attention(nn.Module):
         return attn_output, attn_weights
 
     def _forward_inference(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        past_key_value: Optional[Cache],
-        cache_position: Optional[torch.LongTensor],
-        **kwargs: Unpack[FlashAttentionKwargs],
+            self,
+            hidden_states: torch.Tensor,
+            position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+            attention_mask: Optional[torch.Tensor],
+            past_key_value: Optional[Cache],
+            cache_position: Optional[torch.LongTensor],
+            **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         batch_size, seq_length, _ = hidden_states.shape
         # Ensure that `inference_q_decode`, `inference_v_proj` are up-2-date
@@ -490,7 +490,10 @@ class DeepseekV3Attention(nn.Module):
         c_kv, k_rot = self.kv_a_proj_with_mqa(hidden_states).split(
             (self.kv_lora_rank, self.qk_rope_head_dim), dim=-1
         )
-        c_kv = self.kv_a_layernorm(c_kv)
+        k_rot = k_rot.unsqueeze(-2)
+        # k_rot: (batch_size, seq_length, 1, qk_rope_head_dim)
+        c_kv = self.kv_a_layernorm(c_kv).unsqueeze(-2)
+        # c_kv: (batch_size, seq_length, 1, kv_lora_rank)
         c_q = self.q_a_layernorm(self.q_a_proj(hidden_states))
         # Decoding to Q equivalent
         q_nope, q_rot = torch.matmul(
@@ -500,19 +503,21 @@ class DeepseekV3Attention(nn.Module):
             (self.num_heads * self.kv_lora_rank, self.num_heads * self.qk_rope_head_dim),
             dim=-1
         )
+        q_nope = q_nope.view(batch_size, seq_length, self.num_heads, self.kv_lora_rank)
+        q_rot = q_rot.view(batch_size, seq_length, self.num_heads, self.qk_rope_head_dim)
         # q_nope: (batch_size, seq_length, num_heads * kv_lora_rank)
-        # q_rot: (batch_size, seq_length, num_heads * qk_rope_head_dim)
+        # q_rot: (batch_size, seq_length, num_heads, qk_rope_head_dim)
         # RoPE
         cos, sin = position_embeddings
-        q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, cos, sin)
+        q_rot, k_rot = apply_rotary_pos_emb(
+            q_rot, k_rot, cos, sin, unsqueeze_dim=-2
+        )
         # Reshape and transpose
         kv_cache_dim = self.kv_lora_rank + self.qk_rope_head_dim
         k_equiv = torch.cat((c_kv, k_rot), dim=-1).view(
             batch_size, 1, seq_length, kv_cache_dim
         )
-        q_equiv = torch.cat((q_nope, q_rot), dim=-1).view(
-            batch_size, seq_length, self.num_heads, kv_cache_dim
-        ).transpose(1, 2)
+        q_equiv = torch.cat((q_nope, q_rot), dim=-1).transpose(1, 2)
         # q_equiv: (batch_size, num_heads, seq_length, kv_lora_rank + qk_rope_head_dim)
         # k_equiv: (batch_size, 1, seq_length, kv_lora_rank + qk_rope_head_dim)
 
@@ -556,9 +561,9 @@ class DeepseekV3Attention(nn.Module):
         # attn_output: (batch_size, seq_length, num_heads, kv_lora_rank)
         # inference_v_proj: (num_heads, kv_lora_rank, v_head_dim)
         attn_output = torch.matmul(
+            attn_output.transpose(1, 2),
             self.inference_v_proj.unsqueeze(0),
-            attn_output.transpose(1, 2)
-        ).transpose(1, 2).view(
+        ).transpose(1, 2).reshape(
             batch_size, seq_length, self.num_heads * self.v_head_dim
         )
         attn_output = self.o_proj(attn_output)
