@@ -105,7 +105,7 @@ def test_compare_training_vs_inference_mode(
         past_key_value=past_key_value,
         cache_position=cache_position,
         output_attentions=True,
-    )
+    )[:, :, :, :seq_len]
 
     debug_res1 = dict()  # TODO: Remove
     output1, weights1 = attn._forward_training(
@@ -138,12 +138,12 @@ def test_compare_training_vs_inference_mode(
 
 
 @pytest.mark.parametrize(
-    "batch_size, num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank, q_lora_rank",
+    "batch_size, num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank, q_lora_rank, seq_len, chunk_size",
     [
-        (2, 8, 12, 8, 12, 36, 48),
-        (2, 1, 64, 8, 48, 32, 128),
-        (1, 8, 12, 6, 16, 36, 48),
-        (2, 8, 8, 16, 12, 2, 64),
+        (2, 8, 12, 8, 12, 36, 48, 20, 1),
+        (2, 1, 64, 8, 48, 32, 128, 20, 2),
+        (1, 8, 12, 6, 16, 36, 48, 20, 4),
+        (2, 8, 8, 16, 12, 2, 64, 20, 5),
     ]
 )
 def test_batch_vs_sequential_inference(
@@ -154,8 +154,10 @@ def test_batch_vs_sequential_inference(
     v_head_dim,
     kv_lora_rank,
     q_lora_rank,
+    seq_len,
+    chunk_size,
 ):
-    seq_len = 20
+    assert seq_len % chunk_size == 0
     dtype = torch.float32
     attn_implementation = "eager"
     config = DeepseekV3Config(
@@ -197,7 +199,7 @@ def test_batch_vs_sequential_inference(
         seq_len=seq_len,
         past_key_value=past_key_value,
         cache_position=position_ids[0],
-    )
+    )[:, :, :, :seq_len]
     output1, _ = attn._forward_training(
         hidden_states=hidden_states,
         position_embeddings=position_embeddings,
@@ -207,28 +209,29 @@ def test_batch_vs_sequential_inference(
     )
 
     # Sequential computation, involving KV cache
-    causal_mask = None
-    for position_id in range(seq_len):
+    min_dtype = torch.finfo(dtype).min
+    for position_id in range(0, seq_len, chunk_size):
         cache_position = torch.arange(
-            position_id, position_id + 1, dtype=torch.int64
+            position_id, position_id + chunk_size, dtype=torch.int64
         )
+        causal_mask = torch.zeros(
+            (chunk_size, position_id + chunk_size), dtype=dtype
+        )
+        if chunk_size > 1:
+            causal_mask[:, position_id:] = min_dtype
+            causal_mask[:, position_id:] = torch.triu(
+                causal_mask[:, position_id:], diagonal=1
+            )
+        causal_mask = causal_mask[None, None, ...]
+        input = hidden_states[:, position_id:(position_id + chunk_size), :]
         position_ids = cache_position.unsqueeze(0).expand(batch_size, -1)
-        causal_mask = get_causal_attention_mask(
-            model=bogus_model,
-            batch_size=batch_size,
-            seq_len=1,
-            past_key_value=past_key_value,
-            cache_position=cache_position,
-            attention_mask=causal_mask,
-        )
-        input = hidden_states[:, position_id, :].unsqueeze(1)
         position_embeddings = rotary_emb(input, position_ids)
-        output2, _ = attn._forward_inference(
+        output2, _ = attn._forward_training(
             hidden_states=input,
             position_embeddings=position_embeddings,
             attention_mask=causal_mask,
             past_key_value=past_key_value,
             cache_position=cache_position,
         )
-        print(f"position_id: {position_id}")
-        torch.testing.assert_close(output1[:, position_id, :], output2.squeeze(1))
+        print(f"position_id {position_id}, chunk_size {chunk_size}")
+        torch.testing.assert_close(output1[:, position_id:(position_id + chunk_size), :], output2)
